@@ -62,8 +62,9 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/admin/");
 
   const isProtectedApi =
-    (pathname === "/api/admin" || pathname.startsWith("/api/admin/")) &&
-    pathname !== "/api/admin/logout";
+    ((pathname === "/api/admin" || pathname.startsWith("/api/admin/")) &&
+      pathname !== "/api/admin/logout") ||
+    pathname.startsWith("/api/dashboard/");
 
   if (!isLoggedIn && isProtectedApi) {
     return NextResponse.json(
@@ -93,5 +94,6 @@ export const config = {
     "/admin/:path*",
     "/api/admin",
     "/api/admin/:path*",
+    "/api/dashboard/:path*",
   ],
 };

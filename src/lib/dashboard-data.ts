@@ -10,6 +10,7 @@ export interface PlanDetails {
   maxEvents: number | null;
   maxCertificatesPerEvent: number | null;
   maxCertificatesTotal: number | null;
+  maxCertificateTypesPerEvent: number | null;
   allowCustomBranding: boolean;
   pricePkr: number;
 }
@@ -20,6 +21,28 @@ export interface OrgUsageSummary {
   plan: PlanDetails;
   eventsUsed: number;
   certificatesUsed: number;
+}
+
+export interface CertificateTypeRow {
+  id: string;
+  orgId: string;
+  eventId: string;
+  key: string;
+  label: string;
+  templatePath: string | null;
+  templateMime: "application/pdf" | "image/png" | "image/jpeg" | null;
+  pageWidthPt: number | null;
+  pageHeightPt: number | null;
+  pageCount: number;
+  pageIndex: number;
+  nameX: number;
+  nameY: number;
+  nameFont: string;
+  nameSize: number;
+  nameColor: string;
+  nameAlign: "left" | "center" | "right";
+  maxNameWidth: number;
+  updatedAt: string;
 }
 
 export interface EventSummaryRow {
@@ -41,7 +64,10 @@ export interface EventSummaryRow {
 }
 
 export interface EventDetail extends EventSummaryRow {
+  certificateTypes: CertificateTypeRow[];
   certificateTypesCount: number;
+  maxCertificateTypesPerEvent: number | null;
+  planName: string;
   certificatesIssuedCount: number;
   certificatesDownloadedCount: number;
 }
@@ -52,6 +78,7 @@ const DEFAULT_FREE_PLAN: PlanDetails = {
   maxEvents: 1,
   maxCertificatesPerEvent: 50,
   maxCertificatesTotal: 50,
+  maxCertificateTypesPerEvent: 3,
   allowCustomBranding: false,
   pricePkr: 0,
 };
@@ -67,9 +94,7 @@ export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
   const [planRes, eventsCountRes, certsCountRes] = await Promise.all([
     supabase
       .from("plans")
-      .select(
-        "id, name, max_events, max_certificates_per_event, max_certificates_total, allow_custom_branding, price_pkr",
-      )
+      .select("*")
       .eq("id", org.planId)
       .maybeSingle(),
     supabase
@@ -82,7 +107,7 @@ export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
       .eq("org_id", org.id),
   ]);
 
-  const p = planRes.data;
+  const p = planRes.data as Record<string, unknown> | null;
   const plan: PlanDetails = p
     ? {
         id: p.id as string,
@@ -92,6 +117,10 @@ export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
           (p.max_certificates_per_event as number | null) ?? null,
         maxCertificatesTotal:
           (p.max_certificates_total as number | null) ?? null,
+        maxCertificateTypesPerEvent:
+          p.max_certificate_types_per_event === undefined
+            ? 3
+            : ((p.max_certificate_types_per_event as number | null) ?? null),
         allowCustomBranding: Boolean(p.allow_custom_branding),
         pricePkr: Number(p.price_pkr ?? 0),
       }
@@ -134,6 +163,47 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
     createdAt: row.created_at as string,
     updatedAt: (row.updated_at as string) ?? (row.created_at as string),
     attendeeCount,
+  };
+}
+
+function mapCertificateTypeRow(row: Record<string, unknown>): CertificateTypeRow {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    eventId: row.event_id as string,
+    key: row.key as string,
+    label: row.label as string,
+    templatePath: (row.template_path as string | null) ?? null,
+    templateMime:
+      (row.template_mime as
+        | "application/pdf"
+        | "image/png"
+        | "image/jpeg"
+        | null) ?? null,
+    pageWidthPt:
+      row.page_width_pt !== null && row.page_width_pt !== undefined
+        ? Number(row.page_width_pt)
+        : null,
+    pageHeightPt:
+      row.page_height_pt !== null && row.page_height_pt !== undefined
+        ? Number(row.page_height_pt)
+        : null,
+    pageCount:
+      row.page_count !== null && row.page_count !== undefined
+        ? Number(row.page_count)
+        : 1,
+    pageIndex: Number(row.page_index ?? 0),
+    nameX: Number(row.name_x ?? 0.5),
+    nameY: Number(row.name_y ?? 0.5),
+    nameFont: (row.name_font as string) ?? "TimesNewRoman-Bold",
+    nameSize: Number(row.name_size ?? 34),
+    nameColor: (row.name_color as string) ?? "#0B2A4F",
+    nameAlign: ((row.name_align as string) ?? "center") as
+      | "left"
+      | "center"
+      | "right",
+    maxNameWidth: Number(row.max_name_width ?? 0.55),
+    updatedAt: (row.updated_at as string) ?? (row.created_at as string),
   };
 }
 
@@ -185,12 +255,14 @@ export async function getOrgEventById(
     return null;
   }
 
-  const [typesRes, issuedRes, downloadedRes] = await Promise.all([
+  const [usage, typesRes, issuedRes, downloadedRes] = await Promise.all([
+    getOrgPlanAndUsage(),
     supabase
       .from("certificate_types")
-      .select("id", { count: "exact", head: true })
+      .select("*")
       .eq("org_id", org.id)
-      .eq("event_id", eventId),
+      .eq("event_id", eventId)
+      .order("created_at", { ascending: true }),
     supabase
       .from("attendee_certificates")
       .select("id", { count: "exact", head: true })
@@ -204,10 +276,17 @@ export async function getOrgEventById(
       .gt("download_count", 0),
   ]);
 
+  const certificateTypes = (typesRes.data ?? []).map((row) =>
+    mapCertificateTypeRow(row as Record<string, unknown>),
+  );
+
   const base = mapEventRow(data as Record<string, unknown>);
   return {
     ...base,
-    certificateTypesCount: typesRes.count ?? 0,
+    certificateTypes,
+    certificateTypesCount: certificateTypes.length,
+    maxCertificateTypesPerEvent: usage.plan.maxCertificateTypesPerEvent,
+    planName: usage.plan.name,
     certificatesIssuedCount: issuedRes.count ?? 0,
     certificatesDownloadedCount: downloadedRes.count ?? 0,
   };

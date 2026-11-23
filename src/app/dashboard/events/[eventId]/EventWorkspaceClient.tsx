@@ -17,6 +17,7 @@ import {
 } from "@/app/dashboard/events/actions";
 import type { EventDetail } from "@/lib/dashboard-data";
 import { validateEventSlug } from "@/lib/event-validation";
+import TemplateTabClient from "./TemplateTabClient";
 
 export type EventTab =
   | "overview"
@@ -466,10 +467,11 @@ export default function EventWorkspaceClient({
 
       {/* 2. TEMPLATE TAB */}
       {activeTab === "template" && (
-        <EmptyState
-          icon="🎨"
-          title="Certificate Template & Visual Name Placement"
-          description="Upload a custom PDF or PNG certificate template for this event and drag the recipient name box into place. Template upload and visual editor connect here in the next phase."
+        <TemplateTabClient
+          eventId={event.id}
+          initialTypes={event.certificateTypes}
+          maxTypesPerEvent={event.maxCertificateTypesPerEvent}
+          planName={event.planName}
         />
       )}
 
