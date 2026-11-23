@@ -10,6 +10,9 @@ import { getReleased } from "@/lib/supabase";
 // Release status can change at any time — always render on request.
 export const dynamic = "force-dynamic";
 
+// TODO(saas): this single-event page becomes a marketing landing page; the
+// attendee download form moves to the public event page (/e/[slug]) and
+// SEMINAR_TITLE / SEMINAR_SUBTITLE come from the event row.
 export default async function Home() {
   // Checked on the server only. If the check fails (e.g. DB unreachable),
   // fall back to showing the form; the API enforces the release flag anyway.

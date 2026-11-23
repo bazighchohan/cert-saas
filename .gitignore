@@ -29,13 +29,31 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files
+# env files (secrets) — only the empty template is tracked
 .env*
-.env.local
+!.env.example
 
-# vercel
+# vercel / supabase local state
 .vercel
+/supabase/.temp/
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ---------------------------------------------------------------------------
+# Private / real data — never commit
+# ---------------------------------------------------------------------------
+# Local test output (generated certificates with real names)
+/scratch/
+# Real or signed certificate templates. Only blank samples are tracked;
+# customer templates live in private Supabase Storage.
+/public/*.pdf
+/public/*.png
+/public/*.jpg
+/public/templates/
+# Screenshots may contain attendee names / roll numbers
+/docs/screenshots/
+# Data exports
+*.csv
+!/docs/samples/*.csv

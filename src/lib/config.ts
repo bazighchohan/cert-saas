@@ -1,4 +1,7 @@
 /** Site-wide display settings (server-side). Override via env vars. */
+// TODO(saas): SEMINAR_TITLE / SEMINAR_SUBTITLE are single-event leftovers.
+// Replace with events.title / events.subtitle (per organization) in the events phase,
+// then delete these constants and the env vars. See README "Legacy TODO".
 export const SEMINAR_TITLE =
   process.env.SEMINAR_TITLE ?? "National Seminar 2026";
 
@@ -16,8 +19,12 @@ export const FOOTER_CREDIT_TEXT =
 // Certificate template
 // ---------------------------------------------------------------------------
 
-/** Single 2-page landscape template, relative to /public. */
-export const TEMPLATE_FILE = "template.pdf";
+/**
+ * Single 2-page landscape template, relative to /public.
+ * Blank sample only — real/signed templates are no longer committed.
+ * TODO(saas): load each event's template from private Supabase Storage instead.
+ */
+export const TEMPLATE_FILE = "samples/blank-template.pdf";
 
 import type { CertType } from "@/lib/cert-types";
 export { CERT_TYPES, CERT_LABELS, isCertType, type CertType } from "@/lib/cert-types";

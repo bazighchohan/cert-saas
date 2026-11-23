@@ -34,6 +34,8 @@ export async function POST(req: Request) {
   }
 
   const secret = getSessionSecret();
+  // TODO(saas): shared ADMIN_PASSWORD is a single-tenant leftover. Replace with
+  // Supabase Auth (per-user accounts linked to an organization) in the auth phase.
   const expectedPassword = process.env.ADMIN_PASSWORD;
 
   if (!secret) {
