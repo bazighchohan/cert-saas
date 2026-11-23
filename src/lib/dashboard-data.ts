@@ -29,10 +29,21 @@ export interface EventSummaryRow {
   subtitle: string | null;
   slug: string;
   eventDate: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
   released: boolean;
   identifierLabel: string;
+  requireNameMatch: boolean;
+  downloadLimit: number | null;
   createdAt: string;
+  updatedAt: string;
   attendeeCount: number;
+}
+
+export interface EventDetail extends EventSummaryRow {
+  certificateTypesCount: number;
+  certificatesIssuedCount: number;
+  certificatesDownloadedCount: number;
 }
 
 const DEFAULT_FREE_PLAN: PlanDetails = {
@@ -95,6 +106,37 @@ export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
   };
 });
 
+function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
+  const attendeesRel = row.attendees as
+    | Array<{ count?: number }>
+    | { count?: number }
+    | null;
+  const attendeeCount = Array.isArray(attendeesRel)
+    ? Number(attendeesRel[0]?.count ?? 0)
+    : Number(attendeesRel?.count ?? 0);
+
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    title: row.title as string,
+    subtitle: (row.subtitle as string | null) ?? null,
+    slug: row.slug as string,
+    eventDate: (row.event_date as string | null) ?? null,
+    contactEmail: (row.contact_email as string | null) ?? null,
+    contactPhone: (row.contact_phone as string | null) ?? null,
+    released: Boolean(row.released),
+    identifierLabel: (row.identifier_label as string) ?? "Registration number",
+    requireNameMatch: Boolean(row.require_name_match),
+    downloadLimit:
+      row.download_limit === null || row.download_limit === undefined
+        ? null
+        : Number(row.download_limit),
+    createdAt: row.created_at as string,
+    updatedAt: (row.updated_at as string) ?? (row.created_at as string),
+    attendeeCount,
+  };
+}
+
 /**
  * Lists all events belonging to the current organization (getCurrentOrg()).
  */
@@ -105,7 +147,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
   const { data, error } = await supabase
     .from("events")
     .select(
-      "id, org_id, title, subtitle, slug, event_date, released, identifier_label, created_at, attendees(count)",
+      "id, org_id, title, subtitle, slug, event_date, contact_email, contact_phone, released, identifier_label, require_name_match, download_limit, created_at, updated_at, attendees(count)",
     )
     .eq("org_id", org.id)
     .order("created_at", { ascending: false });
@@ -114,28 +156,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
     return [];
   }
 
-  return data.map((row) => {
-    const attendeesRel = row.attendees as
-      | Array<{ count?: number }>
-      | { count?: number }
-      | null;
-    const attendeeCount = Array.isArray(attendeesRel)
-      ? Number(attendeesRel[0]?.count ?? 0)
-      : Number(attendeesRel?.count ?? 0);
-
-    return {
-      id: row.id as string,
-      orgId: row.org_id as string,
-      title: row.title as string,
-      subtitle: (row.subtitle as string | null) ?? null,
-      slug: row.slug as string,
-      eventDate: (row.event_date as string | null) ?? null,
-      released: Boolean(row.released),
-      identifierLabel: (row.identifier_label as string) ?? "Registration number",
-      createdAt: row.created_at as string,
-      attendeeCount,
-    };
-  });
+  return data.map((row) => mapEventRow(row as Record<string, unknown>));
 });
 
 /**
@@ -144,7 +165,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
  */
 export async function getOrgEventById(
   eventId: string,
-): Promise<EventSummaryRow | null> {
+): Promise<EventDetail | null> {
   const { org } = await requireDashboardAuth();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(eventId)) {
     return null;
@@ -154,7 +175,7 @@ export async function getOrgEventById(
   const { data, error } = await supabase
     .from("events")
     .select(
-      "id, org_id, title, subtitle, slug, event_date, released, identifier_label, created_at, attendees(count)",
+      "id, org_id, title, subtitle, slug, event_date, contact_email, contact_phone, released, identifier_label, require_name_match, download_limit, created_at, updated_at, attendees(count)",
     )
     .eq("id", eventId)
     .eq("org_id", org.id)
@@ -164,24 +185,30 @@ export async function getOrgEventById(
     return null;
   }
 
-  const attendeesRel = data.attendees as
-    | Array<{ count?: number }>
-    | { count?: number }
-    | null;
-  const attendeeCount = Array.isArray(attendeesRel)
-    ? Number(attendeesRel[0]?.count ?? 0)
-    : Number(attendeesRel?.count ?? 0);
+  const [typesRes, issuedRes, downloadedRes] = await Promise.all([
+    supabase
+      .from("certificate_types")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .eq("event_id", eventId),
+    supabase
+      .from("attendee_certificates")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .eq("event_id", eventId),
+    supabase
+      .from("attendee_certificates")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id)
+      .eq("event_id", eventId)
+      .gt("download_count", 0),
+  ]);
 
+  const base = mapEventRow(data as Record<string, unknown>);
   return {
-    id: data.id as string,
-    orgId: data.org_id as string,
-    title: data.title as string,
-    subtitle: (data.subtitle as string | null) ?? null,
-    slug: data.slug as string,
-    eventDate: (data.event_date as string | null) ?? null,
-    released: Boolean(data.released),
-    identifierLabel: (data.identifier_label as string) ?? "Registration number",
-    createdAt: data.created_at as string,
-    attendeeCount,
+    ...base,
+    certificateTypesCount: typesRes.count ?? 0,
+    certificatesIssuedCount: issuedRes.count ?? 0,
+    certificatesDownloadedCount: downloadedRes.count ?? 0,
   };
 }
