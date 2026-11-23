@@ -38,6 +38,7 @@ export interface CertificateTypeRow {
   nameX: number;
   nameY: number;
   nameFont: string;
+  nameBold: boolean;
   nameSize: number;
   nameColor: string;
   nameAlign: "left" | "center" | "right";
@@ -167,6 +168,21 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
 }
 
 function mapCertificateTypeRow(row: Record<string, unknown>): CertificateTypeRow {
+  const pageWidthPt =
+    row.page_width_pt !== null && row.page_width_pt !== undefined
+      ? Number(row.page_width_pt)
+      : null;
+  const pageHeightPt =
+    row.page_height_pt !== null && row.page_height_pt !== undefined
+      ? Number(row.page_height_pt)
+      : null;
+
+  const wRef = pageWidthPt ?? 843.75;
+  const hRef = pageHeightPt ?? 597.75;
+  const rawX = Number(row.name_x ?? 421.88);
+  const rawY = Number(row.name_y ?? 265);
+  const rawMaxW = Number(row.max_name_width ?? 464);
+
   return {
     id: row.id as string,
     orgId: row.org_id as string,
@@ -180,29 +196,24 @@ function mapCertificateTypeRow(row: Record<string, unknown>): CertificateTypeRow
         | "image/png"
         | "image/jpeg"
         | null) ?? null,
-    pageWidthPt:
-      row.page_width_pt !== null && row.page_width_pt !== undefined
-        ? Number(row.page_width_pt)
-        : null,
-    pageHeightPt:
-      row.page_height_pt !== null && row.page_height_pt !== undefined
-        ? Number(row.page_height_pt)
-        : null,
+    pageWidthPt,
+    pageHeightPt,
     pageCount:
       row.page_count !== null && row.page_count !== undefined
         ? Number(row.page_count)
         : 1,
     pageIndex: Number(row.page_index ?? 0),
-    nameX: Number(row.name_x ?? 0.5),
-    nameY: Number(row.name_y ?? 0.5),
-    nameFont: (row.name_font as string) ?? "TimesNewRoman-Bold",
+    nameX: rawX <= 1 ? Number((wRef * rawX).toFixed(2)) : rawX,
+    nameY: rawY <= 1 ? Number((hRef * (1 - rawY)).toFixed(2)) : rawY,
+    nameFont: (row.name_font as string) ?? "times",
+    nameBold: row.name_bold === undefined ? true : Boolean(row.name_bold),
     nameSize: Number(row.name_size ?? 34),
     nameColor: (row.name_color as string) ?? "#0B2A4F",
     nameAlign: ((row.name_align as string) ?? "center") as
       | "left"
       | "center"
       | "right",
-    maxNameWidth: Number(row.max_name_width ?? 0.55),
+    maxNameWidth: rawMaxW <= 1 ? Number((wRef * rawMaxW).toFixed(2)) : rawMaxW,
     updatedAt: (row.updated_at as string) ?? (row.created_at as string),
   };
 }

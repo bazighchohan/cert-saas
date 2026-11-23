@@ -12,6 +12,7 @@ import {
   useToast,
 } from "@/components/ui";
 import type { CertificateTypeRow } from "@/lib/dashboard-data";
+import NamePlacementEditor from "./NamePlacementEditor";
 import {
   addCertificateTypeAction,
   deleteCertificateTypeAction,
@@ -69,6 +70,13 @@ export default function TemplateTabClient({
   // Delete Confirmation Modal state
   const [deletingType, setDeletingType] = useState<CertificateTypeRow | null>(null);
   const [deletingLoading, setDeletingLoading] = useState(false);
+
+  // Active certificate type selected for the Visual Name Placement Editor
+  const [activeEditorTypeId, setActiveEditorTypeId] = useState<string | null>(
+    initialTypes[0]?.id ?? null,
+  );
+  const activeEditorType =
+    initialTypes.find((t) => t.id === activeEditorTypeId) ?? initialTypes[0] ?? null;
 
   // File input refs keyed by certType.id
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -527,18 +535,65 @@ export default function TemplateTabClient({
                       : "Awaiting upload"}
                   </span>
 
-                  <Button
-                    variant={hasTemplate ? "secondary" : "primary"}
-                    size="sm"
-                    loading={isUploading}
-                    onClick={() => fileInputRefs.current[certType.id]?.click()}
-                  >
-                    {hasTemplate ? "Replace Template" : "Upload Template"}
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant={
+                        activeEditorType?.id === certType.id
+                          ? "primary"
+                          : "secondary"
+                      }
+                      size="sm"
+                      onClick={() => setActiveEditorTypeId(certType.id)}
+                    >
+                      ✏️ Place Name Box
+                    </Button>
+                    <Button
+                      variant={hasTemplate ? "secondary" : "primary"}
+                      size="sm"
+                      loading={isUploading}
+                      onClick={() => fileInputRefs.current[certType.id]?.click()}
+                    >
+                      {hasTemplate ? "Replace Template" : "Upload Template"}
+                    </Button>
+                  </div>
                 </div>
               </section>
             );
           })}
+        </div>
+      )}
+
+      {/* Visual Click-to-Place Name Editor for the selected Certificate Type */}
+      {activeEditorType && (
+        <div className="space-y-3 pt-2">
+          {initialTypes.length > 1 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-600">
+                Editing name placement for:
+              </span>
+              {initialTypes.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setActiveEditorTypeId(t.id)}
+                  className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
+                    activeEditorType.id === t.id
+                      ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <NamePlacementEditor
+            key={activeEditorType.id}
+            eventId={eventId}
+            certType={activeEditorType}
+            previewBustKey={previewVersion[activeEditorType.id] ?? 0}
+          />
         </div>
       )}
 
