@@ -1,19 +1,20 @@
 import "server-only";
 
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { getCurrentOrg } from "@/lib/auth";
 
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
-
-/** True if the current request carries a valid admin session cookie. */
+/**
+ * True if the current request has a valid Supabase Auth session belonging to
+ * an active organization. Replaces the legacy single-tenant ADMIN_PASSWORD check.
+ */
 export async function isAdmin(): Promise<boolean> {
-  const token = (await cookies()).get(SESSION_COOKIE)?.value;
-  return verifySessionToken(token);
+  const org = await getCurrentOrg();
+  return org !== null && org.status === "active";
 }
 
 /**
- * Defence in depth for /api/admin/* handlers (proxy.ts also blocks them).
- * Returns a 401 response if not authenticated, otherwise null.
+ * Guard for /api/admin/* handlers.
+ * Returns a 401 response if not authenticated with an active org, otherwise null.
  */
 export async function requireAdminApi(): Promise<NextResponse | null> {
   if (await isAdmin()) return null;

@@ -1,21 +1,16 @@
 import "server-only";
 
-import { NextResponse } from "next/server";
-import { SESSION_COOKIE } from "@/lib/session";
+import { NextResponse, type NextRequest } from "next/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
-export async function POST() {
-  const res = NextResponse.json({ ok: true, message: "Logged out." });
-  res.cookies.set({
-    name: SESSION_COOKIE,
-    value: "",
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 0,
-  });
-  return res;
+export async function POST(req: NextRequest) {
+  try {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.signOut();
+  } catch (err) {
+    console.error("Failed to sign out:", err);
+  }
+  return NextResponse.redirect(new URL("/login", req.url), { status: 303 });
 }

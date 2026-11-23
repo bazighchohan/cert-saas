@@ -1,40 +1,97 @@
+import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
-
-// Reachable without a session.
-const PUBLIC_PATHS = new Set(["/admin/login", "/api/admin/login", "/api/admin/logout"]);
-
 /**
- * Next.js 16 "proxy" (formerly middleware): blocks /admin and /api/admin
- * unless the request has a valid signed admin session cookie.
+ * Next.js 16 Proxy:
+ * - Refreshes the Supabase Auth session cookie via @supabase/ssr.
+ * - Requires login for /dashboard/** (and legacy /admin/** and /api/admin/**).
+ * - Redirects logged-in users visiting /login or /signup to /dashboard.
  */
 export async function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
-  const authed = await verifySessionToken(req.cookies.get(SESSION_COOKIE)?.value);
 
-  if (PUBLIC_PATHS.has(pathname)) {
-    // Already logged in → skip the login page.
-    if (authed && pathname === "/admin/login") {
-      return NextResponse.redirect(new URL("/admin", req.url));
-    }
-    return NextResponse.next();
+  if (pathname === "/admin/login") {
+    return NextResponse.redirect(new URL("/login", req.url));
   }
 
-  if (authed) return NextResponse.next();
+  let res = NextResponse.next({
+    request: { headers: req.headers },
+  });
 
-  if (pathname.startsWith("/api/")) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  let isLoggedIn = false;
+
+  if (url && anonKey) {
+    const supabase = createServerClient(url, anonKey, {
+      cookies: {
+        getAll() {
+          return req.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          for (const { name, value } of cookiesToSet) {
+            req.cookies.set(name, value);
+          }
+          res = NextResponse.next({
+            request: { headers: req.headers },
+          });
+          for (const { name, value, options } of cookiesToSet) {
+            res.cookies.set(name, value, options);
+          }
+        },
+      },
+    });
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    isLoggedIn = Boolean(user);
+  }
+
+  // Logged-in users visiting /login or /signup go straight to /dashboard.
+  if (isLoggedIn && (pathname === "/login" || pathname === "/signup")) {
+    const dest = new URL("/dashboard", req.url);
+    return NextResponse.redirect(dest);
+  }
+
+  const isProtectedPage =
+    pathname === "/dashboard" ||
+    pathname.startsWith("/dashboard/") ||
+    pathname === "/admin" ||
+    pathname.startsWith("/admin/");
+
+  const isProtectedApi =
+    (pathname === "/api/admin" || pathname.startsWith("/api/admin/")) &&
+    pathname !== "/api/admin/logout";
+
+  if (!isLoggedIn && isProtectedApi) {
     return NextResponse.json(
       { error: "Unauthorized", code: "UNAUTHORIZED" },
       { status: 401, headers: { "Cache-Control": "no-store" } },
     );
   }
 
-  const login = new URL("/admin/login", req.url);
-  login.searchParams.set("next", pathname + search);
-  return NextResponse.redirect(login);
+  if (!isLoggedIn && isProtectedPage) {
+    const login = new URL("/login", req.url);
+    login.searchParams.set("next", pathname + search);
+    return NextResponse.redirect(login);
+  }
+
+  return res;
 }
 
 export const config = {
-  matcher: ["/admin", "/admin/:path*", "/api/admin", "/api/admin/:path*"],
+  matcher: [
+    "/dashboard",
+    "/dashboard/:path*",
+    "/login",
+    "/signup",
+    "/forgot-password",
+    "/reset-password",
+    "/admin",
+    "/admin/:path*",
+    "/api/admin",
+    "/api/admin/:path*",
+  ],
 };
