@@ -273,9 +273,13 @@ export default function EventWorkspaceClient({
           )}
           <p className="mt-1 text-xs text-slate-500">
             Public portal:{" "}
-            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700">
-              /e/{event.slug}
-            </code>
+            <Link
+              href={`/e/${event.slug}`}
+              target="_blank"
+              className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-semibold text-indigo-600 hover:bg-indigo-50 hover:underline"
+            >
+              /e/{event.slug} ↗
+            </Link>
             {event.eventDate ? ` · Event date: ${event.eventDate}` : ""}
           </p>
         </div>

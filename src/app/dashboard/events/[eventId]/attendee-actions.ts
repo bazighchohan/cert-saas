@@ -822,3 +822,77 @@ export async function bulkSetCertificateTypeAction(input: {
   revalidatePath(`/dashboard/events/${input.eventId}`);
   return { success: true, affectedCount: removedCount };
 }
+
+/**
+ * Resets download_count (and timestamps) back to 0 for an attendee's certificates
+ * in this event so they can download again when download_limit was reached.
+ * Writes `attendee.downloads_reset` to audit_log.
+ */
+export async function resetAttendeeDownloadsAction(input: {
+  eventId: string;
+  attendeeId: string;
+  attendeeCertificateId?: string;
+}): Promise<AttendeeActionResult> {
+  const user = await getCurrentUser();
+  const org = await getCurrentOrg();
+  if (!user || !org) {
+    return { error: "You must be signed in." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const admin = getSupabaseAdmin();
+
+  const { data: att } = await supabase
+    .from("attendees")
+    .select("id, identifier, full_name")
+    .eq("id", input.attendeeId)
+    .eq("event_id", input.eventId)
+    .eq("org_id", org.id)
+    .maybeSingle();
+
+  if (!att) {
+    return { error: "Attendee not found.", code: "NOT_FOUND" };
+  }
+
+  let query = supabase
+    .from("attendee_certificates")
+    .update({
+      download_count: 0,
+      first_downloaded_at: null,
+      last_downloaded_at: null,
+    })
+    .eq("org_id", org.id)
+    .eq("event_id", input.eventId)
+    .eq("attendee_id", input.attendeeId);
+
+  if (input.attendeeCertificateId) {
+    query = query.eq("id", input.attendeeCertificateId);
+  }
+
+  const { data: resetRows, error: resetErr } = await query.select("id");
+  if (resetErr) {
+    return { error: resetErr.message || "Failed to reset download count." };
+  }
+
+  const resetCount = resetRows?.length ?? 0;
+
+  try {
+    await admin.from("audit_log").insert({
+      org_id: org.id,
+      user_id: user.id,
+      action: "attendee.downloads_reset",
+      details: {
+        event_id: input.eventId,
+        attendee_id: input.attendeeId,
+        identifier: att.identifier,
+        attendee_certificate_id: input.attendeeCertificateId ?? null,
+        reset_certificates_count: resetCount,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to write audit_log for downloads_reset:", err);
+  }
+
+  revalidatePath(`/dashboard/events/${input.eventId}`);
+  return { success: true, affectedCount: resetCount };
+}

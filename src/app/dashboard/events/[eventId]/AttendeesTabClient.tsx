@@ -22,6 +22,7 @@ import {
   bulkDeleteAttendeesAction,
   bulkSetCertificateTypeAction,
   deleteAttendeeAction,
+  resetAttendeeDownloadsAction,
   setAttendeeCertificateTypeAction,
   updateAttendeeAction,
 } from "./attendee-actions";
@@ -111,6 +112,9 @@ export default function AttendeesTabClient({
 
   // Per-checkbox in-flight key `${attendeeId}:${certTypeId}`
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
+  const [resettingAttendeeId, setResettingAttendeeId] = useState<string | null>(
+    null,
+  );
 
   // Keep bulkTypeId valid when certificateTypes change
   useEffect(() => {
@@ -420,6 +424,30 @@ export default function AttendeesTabClient({
   }
 
   // Single delete confirm
+  async function handleResetDownloads(row: AttendeeListItem) {
+    setResettingAttendeeId(row.id);
+    try {
+      const res = await resetAttendeeDownloadsAction({
+        eventId,
+        attendeeId: row.id,
+      });
+      if (res.error) {
+        showToast(res.error, "error");
+        return;
+      }
+      showToast(
+        `Reset download count for ${row.fullName}. They can now download again.`,
+        "success",
+      );
+      await fetchAttendees();
+      router.refresh();
+    } catch {
+      showToast("Failed to reset downloads.", "error");
+    } finally {
+      setResettingAttendeeId(null);
+    }
+  }
+
   async function handleConfirmSingleDelete() {
     if (!deletingAttendee) return;
     setDeletingSingle(true);
@@ -1048,9 +1076,22 @@ export default function AttendeesTabClient({
                         {/* Downloads */}
                         <td className="px-4 py-3 align-top">
                           {row.totalDownloads > 0 ? (
-                            <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
-                              ✓ {row.totalDownloads}
-                            </span>
+                            <div className="inline-flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+                                ✓ {row.totalDownloads}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={resettingAttendeeId === row.id}
+                                onClick={() => void handleResetDownloads(row)}
+                                title="Reset download limit for this attendee"
+                                className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+                              >
+                                {resettingAttendeeId === row.id
+                                  ? "..."
+                                  : "Reset"}
+                              </button>
+                            </div>
                           ) : (
                             <span className="text-xs text-slate-400">0</span>
                           )}
