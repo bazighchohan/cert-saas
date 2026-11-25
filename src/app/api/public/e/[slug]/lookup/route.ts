@@ -23,6 +23,8 @@ export interface PublicCertificateCardItem {
   certificateTypeId: string;
   key: string;
   label: string;
+  pageWidthPt: number | null;
+  pageHeightPt: number | null;
   downloadCount: number;
   downloadLimit: number | null;
   limitReached: boolean;
@@ -136,14 +138,34 @@ export async function POST(
 
   const admin = getSupabaseAdmin();
 
-  // 3. Scoped lookup by (org_id, event_id) + case/space-insensitive matching
-  const { data: candidates, error: attErr } = await admin
+  // 3. Scoped lookup by (org_id, event_id) + case/space-insensitive matching.
+  //    First try exact case-insensitive match on normalized (trimmed + single-spaced)
+  //    identifier so 5,000-row events hit the index directly without row-limit truncation;
+  //    if not found and identifier contains spaces/hyphens, also check wildcard pattern.
+  const exactPattern = escapeIlikeExact(normId);
+  let { data: candidates, error: attErr } = await admin
     .from("attendees")
     .select("id, identifier, full_name")
     .eq("org_id", event.orgId)
     .eq("event_id", event.id)
-    .ilike("identifier", `%${escapeIlikeExact(normId.split(" ")[0])}%`)
-    .limit(20);
+    .ilike("identifier", exactPattern)
+    .limit(5);
+
+  if (!attErr && (!candidates || candidates.length === 0) && normId.includes(" ")) {
+    const wildcardSpaces = normId
+      .split(" ")
+      .map(escapeIlikeExact)
+      .join("%");
+    const fallbackRes = await admin
+      .from("attendees")
+      .select("id, identifier, full_name")
+      .eq("org_id", event.orgId)
+      .eq("event_id", event.id)
+      .ilike("identifier", wildcardSpaces)
+      .limit(10);
+    candidates = fallbackRes.data;
+    attErr = fallbackRes.error;
+  }
 
   if (attErr) {
     console.error("[public:lookup] DB error:", attErr);
@@ -178,7 +200,7 @@ export async function POST(
   const { data: certRows, error: certErr } = await admin
     .from("attendee_certificates")
     .select(
-      "id, download_count, certificate_type_id, certificate_types!inner(id, key, label)",
+      "id, download_count, certificate_type_id, certificate_types!inner(*)",
     )
     .eq("org_id", event.orgId)
     .eq("event_id", event.id)
@@ -207,6 +229,10 @@ export async function POST(
       certificateTypeId: c.certificate_type_id as string,
       key: (ctRel?.key as string) ?? "certificate",
       label: (ctRel?.label as string) ?? "Certificate",
+      pageWidthPt:
+        ctRel?.page_width_pt != null ? Number(ctRel.page_width_pt) : null,
+      pageHeightPt:
+        ctRel?.page_height_pt != null ? Number(ctRel.page_height_pt) : null,
       downloadCount: dlCount,
       downloadLimit: event.downloadLimit,
       limitReached,

@@ -18,11 +18,15 @@ function CertificatePreviewThumbnail({
   token,
   certId,
   label,
+  pageWidthPt,
+  pageHeightPt,
 }: {
   slug: string;
   token: string;
   certId: string;
   label: string;
+  pageWidthPt: number | null;
+  pageHeightPt: number | null;
 }) {
   const [imgDataUrl, setImgDataUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -72,10 +76,15 @@ function CertificatePreviewThumbnail({
     };
   }, [slug, token, certId]);
 
+  const aspectRatio =
+    pageWidthPt && pageHeightPt
+      ? `${pageWidthPt} / ${pageHeightPt}`
+      : "842 / 595";
+
   return (
     <div
       className="relative w-full overflow-hidden rounded-xl border border-slate-200 bg-slate-100"
-      style={{ aspectRatio: "842 / 595" }}
+      style={{ aspectRatio }}
     >
       {imgDataUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -394,6 +403,8 @@ export default function PublicEventPortalClient({
                     token={lookupToken}
                     certId={card.attendeeCertificateId}
                     label={card.label}
+                    pageWidthPt={card.pageWidthPt}
+                    pageHeightPt={card.pageHeightPt}
                   />
                 </div>
 
