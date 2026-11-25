@@ -39,6 +39,8 @@ export interface UpdateEventSettingsInput {
   identifierLabel: string;
   requireNameMatch: boolean;
   downloadLimit: number | null;
+  showQr?: boolean;
+  qrPosition?: "bottom-right" | "bottom-left" | "top-right" | "top-left" | "custom";
 }
 
 function validateCommonDetails(input: {
@@ -363,18 +365,51 @@ export async function updateEventSettingsAction(
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
 
-  const { data: updated, error: updateErr } = await supabase
+  const allowedPositions = new Set([
+    "bottom-right",
+    "bottom-left",
+    "top-right",
+    "top-left",
+    "custom",
+  ]);
+  const qrPosition =
+    input.qrPosition && allowedPositions.has(input.qrPosition)
+      ? input.qrPosition
+      : "bottom-right";
+
+  const basePayload: Record<string, unknown> = {
+    released: Boolean(input.released),
+    identifier_label: identifierLabel,
+    require_name_match: Boolean(input.requireNameMatch),
+    download_limit: input.downloadLimit,
+  };
+
+  const extendedPayload: Record<string, unknown> = {
+    ...basePayload,
+    ...(input.showQr !== undefined ? { show_qr: Boolean(input.showQr) } : {}),
+    ...(input.qrPosition !== undefined ? { qr_position: qrPosition } : {}),
+  };
+
+  let { data: updated, error: updateErr } = await supabase
     .from("events")
-    .update({
-      released: Boolean(input.released),
-      identifier_label: identifierLabel,
-      require_name_match: Boolean(input.requireNameMatch),
-      download_limit: input.downloadLimit,
-    })
+    .update(extendedPayload)
     .eq("id", input.eventId)
     .eq("org_id", org.id)
     .select("id, slug")
     .maybeSingle();
+
+  // Graceful fallback if 006_event_qr_settings.sql hasn't been applied in Supabase yet
+  if (updateErr && /show_qr|qr_position/i.test(updateErr.message)) {
+    const retry = await supabase
+      .from("events")
+      .update(basePayload)
+      .eq("id", input.eventId)
+      .eq("org_id", org.id)
+      .select("id, slug")
+      .maybeSingle();
+    updated = retry.data;
+    updateErr = retry.error;
+  }
 
   if (updateErr || !updated) {
     return { error: updateErr?.message || "Failed to save event settings." };
@@ -393,6 +428,8 @@ export async function updateEventSettingsAction(
         identifier_label: identifierLabel,
         require_name_match: Boolean(input.requireNameMatch),
         download_limit: input.downloadLimit,
+        show_qr: input.showQr,
+        qr_position: qrPosition,
       },
     });
   } catch (err) {

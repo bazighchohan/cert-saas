@@ -75,6 +75,10 @@ export default function EventWorkspaceClient({
       ? event.downloadLimit
       : null,
   );
+  const [showQr, setShowQr] = useState<boolean>(event.showQr);
+  const [qrPosition, setQrPosition] = useState<
+    "bottom-right" | "bottom-left" | "top-right" | "top-left" | "custom"
+  >(event.qrPosition);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -143,6 +147,8 @@ export default function EventWorkspaceClient({
         identifierLabel: trimmedLabel,
         requireNameMatch,
         downloadLimit,
+        showQr,
+        qrPosition,
       });
 
       if (res.error) {
@@ -172,6 +178,8 @@ export default function EventWorkspaceClient({
         identifierLabel: identifierLabel.trim() || event.identifierLabel,
         requireNameMatch,
         downloadLimit,
+        showQr,
+        qrPosition,
       });
 
       if (res.error) {
@@ -627,6 +635,64 @@ export default function EventWorkspaceClient({
                       );
                     })}
                   </div>
+                </div>
+
+                {/* QR Code & Verification Stamp Settings */}
+                <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <label
+                        htmlFor="setting-show-qr"
+                        className="text-sm font-bold text-slate-900"
+                      >
+                        Stamp verification QR code on certificates
+                      </label>
+                      <p className="mt-0.5 text-xs text-slate-600">
+                        Stamps a crisp vector QR code and short verification code linking to{" "}
+                        <code className="font-mono">/verify/&#123;code&#125;</code> onto each generated PDF.
+                      </p>
+                    </div>
+                    <input
+                      id="setting-show-qr"
+                      type="checkbox"
+                      checked={showQr}
+                      onChange={(e) => setShowQr(e.target.checked)}
+                      disabled={savingSettings}
+                      className="mt-1 h-5 w-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  {showQr && (
+                    <div className="pt-2">
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">
+                        QR code corner position
+                      </label>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {(
+                          [
+                            { id: "bottom-right", label: "Bottom Right" },
+                            { id: "bottom-left", label: "Bottom Left" },
+                            { id: "top-right", label: "Top Right" },
+                            { id: "top-left", label: "Top Left" },
+                          ] as const
+                        ).map((pos) => (
+                          <button
+                            key={pos.id}
+                            type="button"
+                            onClick={() => setQrPosition(pos.id)}
+                            disabled={savingSettings}
+                            className={`rounded-lg border px-2.5 py-2 text-xs font-semibold transition ${
+                              qrPosition === pos.id
+                                ? "border-indigo-600 bg-indigo-50 text-indigo-700"
+                                : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                            }`}
+                          >
+                            {pos.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {settingsError && (

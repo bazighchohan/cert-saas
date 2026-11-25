@@ -59,6 +59,9 @@ export interface EventSummaryRow {
   identifierLabel: string;
   requireNameMatch: boolean;
   downloadLimit: number | null;
+  showQr: boolean;
+  qrPosition: "bottom-right" | "bottom-left" | "top-right" | "top-left" | "custom";
+  qrSize: number;
   createdAt: string;
   updatedAt: string;
   attendeeCount: number;
@@ -161,6 +164,25 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
       row.download_limit === null || row.download_limit === undefined
         ? null
         : Number(row.download_limit),
+    showQr: Boolean(row.show_qr ?? false),
+    qrPosition: ([
+      "bottom-right",
+      "bottom-left",
+      "top-right",
+      "top-left",
+      "custom",
+    ].includes(String(row.qr_position))
+      ? String(row.qr_position)
+      : "bottom-right") as
+      | "bottom-right"
+      | "bottom-left"
+      | "top-right"
+      | "top-left"
+      | "custom",
+    qrSize:
+      row.qr_size !== null && row.qr_size !== undefined
+        ? Number(row.qr_size)
+        : 54,
     createdAt: row.created_at as string,
     updatedAt: (row.updated_at as string) ?? (row.created_at as string),
     attendeeCount,
@@ -227,9 +249,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
 
   const { data, error } = await supabase
     .from("events")
-    .select(
-      "id, org_id, title, subtitle, slug, event_date, contact_email, contact_phone, released, identifier_label, require_name_match, download_limit, created_at, updated_at, attendees(count)",
-    )
+    .select("*, attendees(count)")
     .eq("org_id", org.id)
     .order("created_at", { ascending: false });
 
@@ -255,9 +275,7 @@ export async function getOrgEventById(
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase
     .from("events")
-    .select(
-      "id, org_id, title, subtitle, slug, event_date, contact_email, contact_phone, released, identifier_label, require_name_match, download_limit, created_at, updated_at, attendees(count)",
-    )
+    .select("*, attendees(count)")
     .eq("id", eventId)
     .eq("org_id", org.id)
     .maybeSingle();
