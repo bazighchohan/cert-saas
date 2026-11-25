@@ -17,6 +17,7 @@ import {
 } from "@/app/dashboard/events/actions";
 import type { EventDetail } from "@/lib/dashboard-data";
 import { validateEventSlug } from "@/lib/event-validation";
+import AttendeesTabClient from "./AttendeesTabClient";
 import TemplateTabClient from "./TemplateTabClient";
 
 export type EventTab =
@@ -67,6 +68,9 @@ export default function EventWorkspaceClient({
   // Settings tab state
   const [released, setReleased] = useState(event.released);
   const [identifierLabel, setIdentifierLabel] = useState(event.identifierLabel);
+  const [uppercaseIdentifiers, setUppercaseIdentifiers] = useState(
+    event.uppercaseIdentifiers,
+  );
   const [requireNameMatch, setRequireNameMatch] = useState(
     event.requireNameMatch,
   );
@@ -145,6 +149,7 @@ export default function EventWorkspaceClient({
         eventId: event.id,
         released,
         identifierLabel: trimmedLabel,
+        uppercaseIdentifiers,
         requireNameMatch,
         downloadLimit,
         showQr,
@@ -485,10 +490,12 @@ export default function EventWorkspaceClient({
 
       {/* 3. ATTENDEES TAB */}
       {activeTab === "attendees" && (
-        <EmptyState
-          icon="👥"
-          title={`Attendees (${event.attendeeCount})`}
-          description={`Import attendees via CSV or add them manually using "${event.identifierLabel}" as the lookup key. Per-event attendee management connects here in the Attendees phase.`}
+        <AttendeesTabClient
+          eventId={event.id}
+          identifierLabel={event.identifierLabel}
+          uppercaseIdentifiers={uppercaseIdentifiers}
+          certificateTypes={event.certificateTypes}
+          initialPlanName={event.planName}
         />
       )}
 
@@ -573,6 +580,18 @@ export default function EventWorkspaceClient({
                       </button>
                     ))}
                   </div>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={uppercaseIdentifiers}
+                      onChange={(e) => setUppercaseIdentifiers(e.target.checked)}
+                      disabled={savingSettings}
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>
+                      Uppercase identifiers automatically (recommended for roll numbers &amp; IDs; uncheck if case matters)
+                    </span>
+                  </label>
                 </div>
 
                 {/* Require exact name match toggle */}

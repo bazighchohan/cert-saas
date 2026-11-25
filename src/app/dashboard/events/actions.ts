@@ -37,6 +37,7 @@ export interface UpdateEventSettingsInput {
   eventId: string;
   released: boolean;
   identifierLabel: string;
+  uppercaseIdentifiers?: boolean;
   requireNameMatch: boolean;
   downloadLimit: number | null;
   showQr?: boolean;
@@ -386,6 +387,9 @@ export async function updateEventSettingsAction(
 
   const extendedPayload: Record<string, unknown> = {
     ...basePayload,
+    ...(input.uppercaseIdentifiers !== undefined
+      ? { uppercase_identifiers: Boolean(input.uppercaseIdentifiers) }
+      : {}),
     ...(input.showQr !== undefined ? { show_qr: Boolean(input.showQr) } : {}),
     ...(input.qrPosition !== undefined ? { qr_position: qrPosition } : {}),
   };
@@ -398,8 +402,8 @@ export async function updateEventSettingsAction(
     .select("id, slug")
     .maybeSingle();
 
-  // Graceful fallback if 006_event_qr_settings.sql hasn't been applied in Supabase yet
-  if (updateErr && /show_qr|qr_position/i.test(updateErr.message)) {
+  // Graceful fallback if 006 / 007 optional columns haven't been applied in Supabase yet
+  if (updateErr && /show_qr|qr_position|uppercase_identifiers/i.test(updateErr.message)) {
     const retry = await supabase
       .from("events")
       .update(basePayload)

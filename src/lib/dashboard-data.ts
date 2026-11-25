@@ -57,6 +57,7 @@ export interface EventSummaryRow {
   contactPhone: string | null;
   released: boolean;
   identifierLabel: string;
+  uppercaseIdentifiers: boolean;
   requireNameMatch: boolean;
   downloadLimit: number | null;
   showQr: boolean;
@@ -159,6 +160,10 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
     contactPhone: (row.contact_phone as string | null) ?? null,
     released: Boolean(row.released),
     identifierLabel: (row.identifier_label as string) ?? "Registration number",
+    uppercaseIdentifiers:
+      row.uppercase_identifiers === undefined
+        ? true
+        : Boolean(row.uppercase_identifiers),
     requireNameMatch: Boolean(row.require_name_match),
     downloadLimit:
       row.download_limit === null || row.download_limit === undefined
