@@ -267,7 +267,7 @@ export default function OrganizationsListClient({
         onClose={() => !acting && setConfirmOrg(null)}
         onConfirm={() => void handleConfirmToggleSuspend()}
         loading={acting}
-        variant={confirmOrg?.status === "active" ? "danger" : "primary"}
+        danger={confirmOrg?.status === "active"}
         title={
           confirmOrg?.status === "active"
             ? `Suspend "${confirmOrg?.name}"?`
