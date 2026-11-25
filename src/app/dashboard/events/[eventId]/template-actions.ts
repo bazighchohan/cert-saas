@@ -3,6 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
 import { resolveCuratedFont } from "@/lib/fonts";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+} from "@/lib/plan-enforcement";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { validateAndInspectTemplate } from "@/lib/template-validator";
@@ -10,7 +14,12 @@ import { validateAndInspectTemplate } from "@/lib/template-validator";
 export interface TemplateActionResult {
   success?: boolean;
   error?: string;
-  code?: "PLAN_LIMIT_REACHED" | "VALIDATION_ERROR" | "NOT_FOUND";
+  code?:
+    | "PLAN_LIMIT_REACHED"
+    | "PLAN_EXPIRED"
+    | "ORG_SUSPENDED"
+    | "VALIDATION_ERROR"
+    | "NOT_FOUND";
   certTypeId?: string;
 }
 
@@ -47,6 +56,15 @@ export async function addCertificateTypeAction(input: {
     };
   }
 
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
@@ -62,36 +80,27 @@ export async function addCertificateTypeAction(input: {
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
 
-  // Enforce plan limit max_certificate_types_per_event if defined on the plan.
-  const [planRes, existingRes] = await Promise.all([
-    supabase
-      .from("plans")
-      .select("*")
-      .eq("id", org.planId)
-      .maybeSingle(),
-    supabase
-      .from("certificate_types")
-      .select("id, key")
-      .eq("org_id", org.id)
-      .eq("event_id", input.eventId),
-  ]);
-
-  const planRow = planRes.data as Record<string, unknown> | null;
-  const maxTypes =
-    planRow && planRow.max_certificate_types_per_event !== undefined
-      ? (planRow.max_certificate_types_per_event as number | null)
-      : null;
-  const planName = (planRow?.name as string) || org.planId;
-  const existingTypes = existingRes.data ?? [];
-
-  if (maxTypes !== null && existingTypes.length >= maxTypes) {
-    return {
-      code: "PLAN_LIMIT_REACHED",
-      error: `Your ${planName} plan allows up to ${maxTypes} certificate type${
-        maxTypes === 1 ? "" : "s"
-      } per event (${existingTypes.length}/${maxTypes} used). Upgrade your plan to add more certificate types.`,
-    };
+  // Central plan & expiration enforcement (max_certificate_types_per_event + read-only check).
+  try {
+    await assertWithinPlan(org.id, {
+      kind: "certificate_type",
+      eventId: input.eventId,
+      add: 1,
+    });
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
+
+  const { data: existingData } = await supabase
+    .from("certificate_types")
+    .select("id, key")
+    .eq("org_id", org.id)
+    .eq("event_id", input.eventId);
+
+  const existingTypes = existingData ?? [];
 
   const usedKeys = new Set(existingTypes.map((r) => r.key as string));
   const baseKey = slugifyTypeKey(cleanLabel);
@@ -161,6 +170,15 @@ export async function renameCertificateTypeAction(input: {
     };
   }
 
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
+  }
+
   const supabase = await createSupabaseServerClient();
   const { data: updated, error } = await supabase
     .from("certificate_types")
@@ -209,6 +227,15 @@ export async function selectTemplatePageAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const supabase = await createSupabaseServerClient();
@@ -300,6 +327,15 @@ export async function deleteCertificateTypeAction(input: {
     return { error: "You must be signed in." };
   }
 
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
@@ -379,6 +415,15 @@ export async function saveNamePlacementAction(
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const nameXPt = Number(Number(input.nameXPt).toFixed(2));

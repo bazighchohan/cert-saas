@@ -3,6 +3,10 @@ import "server-only";
 import { cache } from "react";
 import { randomUUID } from "node:crypto";
 import { redirect } from "next/navigation";
+import {
+  isPlanExpired,
+  isPlanExpiringWithinDays,
+} from "@/lib/plan-enforcement-helpers";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -23,6 +27,9 @@ export interface CurrentOrg {
   slug: string;
   planId: string;
   status: OrgStatus;
+  planExpiresAt: string | null;
+  planExpiringSoon: boolean;
+  isReadOnly: boolean;
   role: OrgRole;
   userId: string;
   userEmail: string;
@@ -131,7 +138,7 @@ async function findExistingOrgForUser(
   const admin = getSupabaseAdmin();
   const { data, error } = await admin
     .from("organization_members")
-    .select("role, organizations!inner(id, name, slug, plan_id, status)")
+    .select("role, organizations!inner(*)")
     .eq("user_id", userId)
     .order("created_at", { ascending: true })
     .limit(1)
@@ -141,18 +148,29 @@ async function findExistingOrgForUser(
     return null;
   }
 
-  const org = Array.isArray(data.organizations)
+  const org = (Array.isArray(data.organizations)
     ? data.organizations[0]
-    : data.organizations;
+    : data.organizations) as Record<string, unknown> | undefined;
 
   if (!org) return null;
+
+  const status = ((org.status as OrgStatus) ?? "active") as OrgStatus;
+  const planExpiresAt =
+    typeof org.plan_expires_at === "string" ? org.plan_expires_at : null;
+  const expired = isPlanExpired(planExpiresAt);
+  const expiringSoon =
+    !expired &&
+    (Boolean(org.plan_expiring_soon) || isPlanExpiringWithinDays(planExpiresAt, 7));
 
   return {
     id: org.id as string,
     name: org.name as string,
     slug: org.slug as string,
     planId: org.plan_id as string,
-    status: (org.status as OrgStatus) ?? "active",
+    status,
+    planExpiresAt,
+    planExpiringSoon: expiringSoon,
+    isReadOnly: status !== "active" || expired,
     role: (data.role as OrgRole) ?? "owner",
     userId,
     userEmail,
@@ -216,6 +234,9 @@ export async function provisionOrganizationForUser(
           slug: row.org_slug,
           planId: row.plan_id || "free",
           status: "active",
+          planExpiresAt: null,
+          planExpiringSoon: false,
+          isReadOnly: false,
           role: row.role || "owner",
           userId,
           userEmail,
@@ -337,6 +358,9 @@ export async function provisionOrganizationForUser(
       slug: createdSlug,
       planId: "free",
       status: "active",
+      planExpiresAt: null,
+      planExpiringSoon: false,
+      isReadOnly: false,
       role: "owner",
       userId,
       userEmail,

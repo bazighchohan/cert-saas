@@ -2,6 +2,10 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+} from "@/lib/plan-enforcement";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
   autoDetectColumnMapping,
@@ -24,6 +28,18 @@ export async function POST(
   const org = await getCurrentOrg();
   if (!user || !org) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: err.httpStatus },
+      );
+    }
+    throw err;
   }
 
   const { eventId } = await context.params;

@@ -3,6 +3,10 @@ import "server-only";
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+} from "@/lib/plan-enforcement";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -45,6 +49,18 @@ export async function POST(
       { error: "Unauthorized", code: "UNAUTHORIZED" },
       { status: 401 },
     );
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: err.httpStatus },
+      );
+    }
+    throw err;
   }
 
   const { eventId } = await context.params;

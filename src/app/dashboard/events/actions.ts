@@ -3,13 +3,23 @@
 import { revalidatePath } from "next/cache";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
 import { validateEventSlug } from "@/lib/event-validation";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+} from "@/lib/plan-enforcement";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export interface EventActionResult {
   success?: boolean;
   error?: string;
-  code?: "PLAN_LIMIT_REACHED" | "SLUG_TAKEN" | "VALIDATION_ERROR" | "NOT_FOUND";
+  code?:
+    | "PLAN_LIMIT_REACHED"
+    | "PLAN_EXPIRED"
+    | "ORG_SUSPENDED"
+    | "SLUG_TAKEN"
+    | "VALIDATION_ERROR"
+    | "NOT_FOUND";
   eventId?: string;
   slug?: string;
 }
@@ -130,33 +140,17 @@ export async function createEventAction(
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  // 1. Enforce plan limit max_events server-side.
-  const [planRes, countRes] = await Promise.all([
-    supabase
-      .from("plans")
-      .select("id, name, max_events")
-      .eq("id", org.planId)
-      .maybeSingle(),
-    supabase
-      .from("events")
-      .select("id", { count: "exact", head: true })
-      .eq("org_id", org.id),
-  ]);
-
-  const maxEvents =
-    planRes.data?.max_events === undefined
-      ? 1
-      : (planRes.data.max_events as number | null);
-  const planName = (planRes.data?.name as string) || org.planId;
-  const currentEvents = countRes.count ?? 0;
-
-  if (maxEvents !== null && currentEvents >= maxEvents) {
-    return {
-      code: "PLAN_LIMIT_REACHED",
-      error: `Your organization has reached the ${planName} plan limit of ${maxEvents} event${
-        maxEvents === 1 ? "" : "s"
-      } (${currentEvents}/${maxEvents} used). Upgrade your plan in Billing to create more events.`,
-    };
+  // 1. Central plan & expiration enforcement (max_events + read-only check).
+  try {
+    await assertWithinPlan(org.id, "event");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return {
+        code: err.code,
+        error: err.message,
+      };
+    }
+    throw err;
   }
 
   // 2. Check global slug uniqueness across all tenants (admin client because RLS hides other orgs' events).
@@ -240,6 +234,15 @@ export async function updateEventOverviewAction(
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in to update an event." };
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const validated = validateCommonDetails(input);
@@ -334,6 +337,15 @@ export async function updateEventSettingsAction(
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in to update event settings." };
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const identifierLabel = input.identifierLabel.trim();
@@ -462,6 +474,15 @@ export async function deleteEventAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in to delete an event." };
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const supabase = await createSupabaseServerClient();

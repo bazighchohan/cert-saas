@@ -2,6 +2,7 @@ import "server-only";
 
 import { cache } from "react";
 import { requireDashboardAuth, type CurrentOrg, type CurrentUser } from "@/lib/auth";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export interface PlanDetails {
@@ -21,6 +22,43 @@ export interface OrgUsageSummary {
   plan: PlanDetails;
   eventsUsed: number;
   certificatesUsed: number;
+}
+
+export type PaymentMethod = "bank" | "jazzcash" | "easypaisa";
+export type PaymentRequestStatus = "pending" | "approved" | "rejected";
+
+export interface PaymentRequestRow {
+  id: string;
+  orgId: string;
+  orgName?: string;
+  planId: string;
+  planName: string;
+  amountPkr: number;
+  paymentMethod: PaymentMethod;
+  transactionReference: string;
+  hasScreenshot: boolean;
+  status: PaymentRequestStatus;
+  billingDays: number;
+  reviewerNote: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
+export interface BillingDashboardData extends OrgUsageSummary {
+  allPlans: PlanDetails[];
+  paymentRequests: PaymentRequestRow[];
+  isSuperAdmin: boolean;
+  adminPendingRequests: PaymentRequestRow[];
+}
+
+export function isSuperAdminEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const raw = process.env.SUPER_ADMIN_EMAILS || "";
+  const allowed = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return allowed.includes(email.trim().toLowerCase());
 }
 
 export interface CertificateTypeRow {
@@ -323,5 +361,108 @@ export async function getOrgEventById(
     planName: usage.plan.name,
     certificatesIssuedCount: issuedRes.count ?? 0,
     certificatesDownloadedCount: downloadedRes.count ?? 0,
+  };
+}
+
+function mapPlanRow(p: Record<string, unknown>): PlanDetails {
+  return {
+    id: p.id as string,
+    name: p.name as string,
+    maxEvents: (p.max_events as number | null) ?? null,
+    maxCertificatesPerEvent:
+      (p.max_certificates_per_event as number | null) ?? null,
+    maxCertificatesTotal: (p.max_certificates_total as number | null) ?? null,
+    maxCertificateTypesPerEvent:
+      p.max_certificate_types_per_event === undefined
+        ? null
+        : ((p.max_certificate_types_per_event as number | null) ?? null),
+    allowCustomBranding: Boolean(p.allow_custom_branding),
+    pricePkr: Number(p.price_pkr ?? 0),
+  };
+}
+
+function mapPaymentRequestRow(
+  r: Record<string, unknown>,
+  planNameById: Map<string, string>,
+): PaymentRequestRow {
+  const planId = (r.plan_id as string) || "starter";
+  const orgRel = Array.isArray(r.organizations)
+    ? (r.organizations[0] as Record<string, unknown> | undefined)
+    : (r.organizations as Record<string, unknown> | undefined);
+
+  return {
+    id: r.id as string,
+    orgId: r.org_id as string,
+    orgName: typeof orgRel?.name === "string" ? orgRel.name : undefined,
+    planId,
+    planName: planNameById.get(planId) ?? planId,
+    amountPkr: Number(r.amount_pkr ?? 0),
+    paymentMethod: (["bank", "jazzcash", "easypaisa"].includes(
+      String(r.payment_method),
+    )
+      ? String(r.payment_method)
+      : "bank") as PaymentMethod,
+    transactionReference: String(r.transaction_reference ?? ""),
+    hasScreenshot: Boolean(r.screenshot_path),
+    status: (["pending", "approved", "rejected"].includes(String(r.status))
+      ? String(r.status)
+      : "pending") as PaymentRequestStatus,
+    billingDays: Number(r.billing_days ?? 30),
+    reviewerNote:
+      typeof r.reviewer_note === "string" ? r.reviewer_note : null,
+    reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
+    createdAt: String(r.created_at ?? new Date().toISOString()),
+  };
+}
+
+export async function getBillingDashboardData(): Promise<BillingDashboardData> {
+  const usage = await getOrgPlanAndUsage();
+  const supabase = await createSupabaseServerClient();
+  const admin = getSupabaseAdmin();
+  const superAdmin = isSuperAdminEmail(usage.user.email);
+
+  const [plansRes, orgReqsRes, adminReqsRes] = await Promise.all([
+    supabase
+      .from("plans")
+      .select("*")
+      .eq("active", true)
+      .order("price_pkr", { ascending: true }),
+    supabase
+      .from("payment_requests")
+      .select("*")
+      .eq("org_id", usage.org.id)
+      .order("created_at", { ascending: false })
+      .limit(25),
+    superAdmin
+      ? admin
+          .from("payment_requests")
+          .select("*, organizations(name)")
+          .eq("status", "pending")
+          .order("created_at", { ascending: true })
+          .limit(50)
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+
+  const allPlans =
+    plansRes.data && plansRes.data.length > 0
+      ? plansRes.data.map((row) => mapPlanRow(row as Record<string, unknown>))
+      : [DEFAULT_FREE_PLAN];
+
+  const planNameById = new Map(allPlans.map((p) => [p.id, p.name]));
+
+  const paymentRequests = (orgReqsRes.data ?? []).map((row) =>
+    mapPaymentRequestRow(row as Record<string, unknown>, planNameById),
+  );
+
+  const adminPendingRequests = (adminReqsRes.data ?? []).map((row) =>
+    mapPaymentRequestRow(row as Record<string, unknown>, planNameById),
+  );
+
+  return {
+    ...usage,
+    allPlans,
+    paymentRequests,
+    isSuperAdmin: superAdmin,
+    adminPendingRequests,
   };
 }

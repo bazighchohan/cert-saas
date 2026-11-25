@@ -49,6 +49,7 @@ cp .env.example .env.local      # Windows PowerShell: Copy-Item .env.example .en
 #    supabase/migrations/008_bulk_import_attendees.sql
 #    supabase/migrations/009_atomic_certificate_download.sql
 #    supabase/migrations/010_attendee_issue_note.sql
+#    supabase/migrations/011_billing_and_plan_enforcement.sql
 #    (NOT the legacy schema.sql — the old single-event code is ported in the next phases)
 
 # 4. Run
@@ -85,6 +86,7 @@ supabase/migrations numbered SQL migrations — run in order in the Supabase SQL
 - [x] **4. Templates** — upload PDF/PNG/JPG to private Storage (`004_storage_templates.sql`), visual click-to-place name-box editor (`005_name_placement_pts.sql`, `pdfjs-dist` canvas, curated TTF fonts including script & Urdu/Arabic, test PDF generator)
 - [x] **5. Public event page** — `/e/[slug]` student lookup & download flow, preview cards, IP + identifier rate limiting, atomic `download_limit` enforcement (`009_atomic_certificate_download.sql`), and admin Reset Download action
 - [x] **6. Admin tracking** — Downloads tab with KPI summary cards, Recharts daily downloads chart, filterable downloaded / not-downloaded / per-type table, CSV & Excel (`.xlsx`) exports, pending-email copy, per-attendee `download_log` history, and Issues / name-correction notes (`010_attendee_issue_note.sql`)
+- [x] **6b. Billing & plan enforcement** — central `assertWithinPlan(orgId, resource)` guard, read-only mode on plan expiration while public downloads remain live, `/dashboard/billing` with usage meters, plan comparison & manual Bank/JazzCash/Easypaisa `payment_requests` + screenshot upload, atomic approval upgrade trigger/RPC, and daily Vercel Cron (`/api/cron/check-expiring-plans`, `011_billing_and_plan_enforcement.sql`)
 - [ ] **7. Deploy** — new Vercel project, production env vars
 
 ### Legacy TODO (single-event leftovers, kept working until replaced)

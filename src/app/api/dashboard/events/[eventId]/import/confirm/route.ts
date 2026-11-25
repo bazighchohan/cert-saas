@@ -3,6 +3,10 @@ import "server-only";
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+} from "@/lib/plan-enforcement";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -26,6 +30,18 @@ export async function POST(
   const org = await getCurrentOrg();
   if (!user || !org) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    await assertWithinPlan(org.id, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: err.httpStatus },
+      );
+    }
+    throw err;
   }
 
   const { eventId } = await context.params;
@@ -165,46 +181,18 @@ export async function POST(
         }
 
         // Fallback path if 008_bulk_import_attendees.sql hasn't been applied in Supabase SQL Editor yet:
-        // Pre-verify plan limits strictly before batching
-        const [planRes, evCertsRes, orgCertsRes, existingAttRes] =
-          await Promise.all([
-            supabase
-              .from("plans")
-              .select("*")
-              .eq("id", org.planId)
-              .maybeSingle(),
-            supabase
-              .from("attendee_certificates")
-              .select("id", { count: "exact", head: true })
-              .eq("org_id", org.id)
-              .eq("event_id", eventId),
-            supabase
-              .from("attendee_certificates")
-              .select("id", { count: "exact", head: true })
-              .eq("org_id", org.id),
-            supabase
-              .from("attendees")
-              .select("id, identifier, attendee_certificates(certificate_type_id)")
-              .eq("org_id", org.id)
-              .eq("event_id", eventId),
-          ]);
-
-        const plan = planRes.data as Record<string, unknown> | null;
-        const maxPerEvent =
-          plan?.max_certificates_per_event === undefined
-            ? 50
-            : ((plan.max_certificates_per_event as number | null) ?? null);
-        const maxTotal =
-          plan?.max_certificates_total === undefined
-            ? 50
-            : ((plan.max_certificates_total as number | null) ?? null);
-        const planName = (plan?.name as string) || org.planId;
+        // Pre-verify plan limits strictly via central assertWithinPlan before batching
+        const { data: existingAttData } = await supabase
+          .from("attendees")
+          .select("id, identifier, attendee_certificates(certificate_type_id)")
+          .eq("org_id", org.id)
+          .eq("event_id", eventId);
 
         const existingMap = new Map<
           string,
           { id: string; certSet: Set<string> }
         >();
-        for (const a of existingAttRes.data ?? []) {
+        for (const a of existingAttData ?? []) {
           const certs = Array.isArray(a.attendee_certificates)
             ? (a.attendee_certificates as Array<{ certificate_type_id: string }>)
             : [];
@@ -228,27 +216,20 @@ export async function POST(
           }
         }
 
-        const evCertsNow = evCertsRes.count ?? 0;
-        const orgCertsNow = orgCertsRes.count ?? 0;
-        if (
-          maxPerEvent !== null &&
-          (evCertsNow + projectedNewCerts > maxPerEvent ||
-            existingMap.size + projectedNewAtt > maxPerEvent)
-        ) {
-          send({
-            type: "error",
-            error: `Plan limit exceeded on ${planName} plan (max ${maxPerEvent} per event).`,
+        try {
+          await assertWithinPlan(org.id, {
+            kind: "import",
+            eventId,
+            addAttendees: projectedNewAtt,
+            addCertificates: projectedNewCerts,
           });
-          controller.close();
-          return;
-        }
-        if (maxTotal !== null && orgCertsNow + projectedNewCerts > maxTotal) {
-          send({
-            type: "error",
-            error: `Plan limit exceeded on ${planName} plan (max ${maxTotal} total certificates).`,
-          });
-          controller.close();
-          return;
+        } catch (err) {
+          if (isPlanEnforcementError(err)) {
+            send({ type: "error", error: err.message });
+            controller.close();
+            return;
+          }
+          throw err;
         }
 
         let insertedCount = 0;

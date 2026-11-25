@@ -4,6 +4,11 @@ import { revalidatePath } from "next/cache";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { validateAttendeeFields } from "@/lib/attendee-validation";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  assertWithinPlan,
+  isPlanEnforcementError,
+  type PlanErrorCode,
+} from "@/lib/plan-enforcement";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -11,7 +16,7 @@ export interface AttendeeActionResult {
   success?: boolean;
   error?: string;
   code?:
-    | "PLAN_LIMIT_REACHED"
+    | PlanErrorCode
     | "DUPLICATE_IDENTIFIER"
     | "VALIDATION_ERROR"
     | "NOT_FOUND";
@@ -51,110 +56,42 @@ async function loadScopedEvent(
 }
 
 /**
- * Enforces both `plans.max_certificates_per_event` and `plans.max_certificates_total`
- * server-side before creating new attendee certificate records (or new attendees).
+ * Central plan & expiration wrapper for attendee / certificate mutations.
  */
-async function enforceCertificateQuota(params: {
-  supabase: SupabaseClient;
-  orgId: string;
-  planId: string;
-  eventId: string;
-  newCertificatesCount: number;
-  addingNewAttendee?: boolean;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
-  const {
-    supabase,
-    orgId,
-    planId,
-    eventId,
-    newCertificatesCount,
-    addingNewAttendee = false,
-  } = params;
-
-  const [planRes, eventCertsRes, orgCertsRes, eventAttendeesRes] =
-    await Promise.all([
-      supabase.from("plans").select("*").eq("id", planId).maybeSingle(),
-      supabase
-        .from("attendee_certificates")
-        .select("id", { count: "exact", head: true })
-        .eq("org_id", orgId)
-        .eq("event_id", eventId),
-      supabase
-        .from("attendee_certificates")
-        .select("id", { count: "exact", head: true })
-        .eq("org_id", orgId),
-      addingNewAttendee
-        ? supabase
-            .from("attendees")
-            .select("id", { count: "exact", head: true })
-            .eq("org_id", orgId)
-            .eq("event_id", eventId)
-        : Promise.resolve({ count: 0 }),
-    ]);
-
-  const plan = planRes.data as Record<string, unknown> | null;
-  const planName = (plan?.name as string) || planId;
-  const maxPerEvent =
-    plan?.max_certificates_per_event === undefined
-      ? 50
-      : ((plan.max_certificates_per_event as number | null) ?? null);
-  const maxTotal =
-    plan?.max_certificates_total === undefined
-      ? 50
-      : ((plan.max_certificates_total as number | null) ?? null);
-
-  const eventCertsUsed = eventCertsRes.count ?? 0;
-  const orgCertsUsed = orgCertsRes.count ?? 0;
-  const eventAttendeesUsed = eventAttendeesRes.count ?? 0;
-
-  if (newCertificatesCount > 0) {
-    if (
-      maxPerEvent !== null &&
-      eventCertsUsed + newCertificatesCount > maxPerEvent
-    ) {
-      return {
-        ok: false,
-        error: `Plan limit reached: issuing ${newCertificatesCount} more certificate${
-          newCertificatesCount === 1 ? "" : "s"
-        } would exceed the ${planName} plan limit of ${maxPerEvent} certificates per event (${eventCertsUsed}/${maxPerEvent} used). Upgrade your plan in Billing.`,
-      };
+async function enforceAttendeePlan(
+  orgId: string,
+  eventId: string,
+  newCertificatesCount: number,
+  addingNewAttendee = false,
+): Promise<{ ok: true } | { ok: false; error: string; code: PlanErrorCode }> {
+  try {
+    await assertWithinPlan(orgId, {
+      kind: addingNewAttendee ? "attendee" : "certificate",
+      eventId,
+      addAttendees: addingNewAttendee ? 1 : 0,
+      addCertificates: newCertificatesCount,
+    });
+    return { ok: true };
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { ok: false, error: err.message, code: err.code };
     }
+    throw err;
+  }
+}
 
-    if (
-      maxTotal !== null &&
-      orgCertsUsed + newCertificatesCount > maxTotal
-    ) {
-      return {
-        ok: false,
-        error: `Plan limit reached: issuing ${newCertificatesCount} more certificate${
-          newCertificatesCount === 1 ? "" : "s"
-        } would exceed the ${planName} plan total limit of ${maxTotal} certificates across all events (${orgCertsUsed}/${maxTotal} used). Upgrade your plan in Billing.`,
-      };
+async function enforceWriteAccess(
+  orgId: string,
+): Promise<{ ok: true } | { ok: false; error: string; code: PlanErrorCode }> {
+  try {
+    await assertWithinPlan(orgId, "write");
+    return { ok: true };
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { ok: false, error: err.message, code: err.code };
     }
+    throw err;
   }
-
-  // Also cap raw attendee rows per event at max_certificates_per_event so limits
-  // cannot be bypassed by adding attendees with 0 certificate types checked.
-  if (addingNewAttendee && maxPerEvent !== null && eventAttendeesUsed + 1 > maxPerEvent) {
-    return {
-      ok: false,
-      error: `Plan limit reached: this event already has ${eventAttendeesUsed}/${maxPerEvent} attendees allowed on the ${planName} plan. Upgrade your plan in Billing to add more attendees.`,
-    };
-  }
-
-  if (
-    addingNewAttendee &&
-    newCertificatesCount === 0 &&
-    maxTotal !== null &&
-    orgCertsUsed + 1 > maxTotal
-  ) {
-    return {
-      ok: false,
-      error: `Plan limit reached: your organization has already used ${orgCertsUsed}/${maxTotal} total certificates on the ${planName} plan. Upgrade your plan in Billing.`,
-    };
-  }
-
-  return { ok: true };
 }
 
 /**
@@ -173,6 +110,11 @@ export async function addAttendeeAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -227,18 +169,16 @@ export async function addAttendeeAction(input: {
     validTypeIds = (validTypes ?? []).map((t) => t.id as string);
   }
 
-  // Enforce plan limits (max_certificates_per_event & max_certificates_total)
-  const quota = await enforceCertificateQuota({
-    supabase,
-    orgId: org.id,
-    planId: org.planId,
-    eventId: input.eventId,
-    newCertificatesCount: validTypeIds.length,
-    addingNewAttendee: true,
-  });
+  // Enforce plan limits & active/unexpired check via assertWithinPlan
+  const quota = await enforceAttendeePlan(
+    org.id,
+    input.eventId,
+    validTypeIds.length,
+    true,
+  );
 
   if (!quota.ok) {
-    return { error: quota.error, code: "PLAN_LIMIT_REACHED" };
+    return { error: quota.error, code: quota.code };
   }
 
   // Insert attendee
@@ -330,6 +270,11 @@ export async function updateAttendeeAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -428,6 +373,11 @@ export async function deleteAttendeeAction(input: {
     return { error: "You must be signed in." };
   }
 
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
@@ -485,6 +435,11 @@ export async function bulkDeleteAttendeesAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
   }
 
   const uniqueIds = Array.from(new Set(input.attendeeIds)).filter(Boolean);
@@ -581,16 +536,9 @@ export async function setAttendeeCertificateTypeAction(input: {
       return { success: true, affectedCount: 0 };
     }
 
-    const quota = await enforceCertificateQuota({
-      supabase,
-      orgId: org.id,
-      planId: org.planId,
-      eventId: input.eventId,
-      newCertificatesCount: 1,
-    });
-
+    const quota = await enforceAttendeePlan(org.id, input.eventId, 1, false);
     if (!quota.ok) {
-      return { error: quota.error, code: "PLAN_LIMIT_REACHED" };
+      return { error: quota.error, code: quota.code };
     }
 
     const { error: insErr } = await supabase
@@ -628,6 +576,11 @@ export async function setAttendeeCertificateTypeAction(input: {
   }
 
   // Unassign
+  const unassignGuard = await enforceWriteAccess(org.id);
+  if (!unassignGuard.ok) {
+    return { error: unassignGuard.error, code: unassignGuard.code };
+  }
+
   if (!existingCertRes.data) {
     return { success: true, affectedCount: 0 };
   }
@@ -735,16 +688,15 @@ export async function bulkSetCertificateTypeAction(input: {
       return { success: true, affectedCount: 0 };
     }
 
-    const quota = await enforceCertificateQuota({
-      supabase,
-      orgId: org.id,
-      planId: org.planId,
-      eventId: input.eventId,
-      newCertificatesCount: toInsertIds.length,
-    });
+    const quota = await enforceAttendeePlan(
+      org.id,
+      input.eventId,
+      toInsertIds.length,
+      false,
+    );
 
     if (!quota.ok) {
-      return { error: quota.error, code: "PLAN_LIMIT_REACHED" };
+      return { error: quota.error, code: quota.code };
     }
 
     const rows = toInsertIds.map((attendeeId) => ({
@@ -786,6 +738,11 @@ export async function bulkSetCertificateTypeAction(input: {
   }
 
   // Bulk unassign
+  const bulkUnassignGuard = await enforceWriteAccess(org.id);
+  if (!bulkUnassignGuard.ok) {
+    return { error: bulkUnassignGuard.error, code: bulkUnassignGuard.code };
+  }
+
   const { data: deleted, error: delErr } = await supabase
     .from("attendee_certificates")
     .delete()
@@ -837,6 +794,11 @@ export async function resetAttendeeDownloadsAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -911,6 +873,11 @@ export async function saveAttendeeIssueNoteAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const writeGuard = await enforceWriteAccess(org.id);
+  if (!writeGuard.ok) {
+    return { error: writeGuard.error, code: writeGuard.code };
   }
 
   const cleanIssue = input.issueNote.trim();

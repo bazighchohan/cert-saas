@@ -18,7 +18,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: "/dashboard", label: "Events", icon: "📅", exact: true },
   { href: "/dashboard/settings", label: "Settings", icon: "⚙️" },
-  { href: "/dashboard/billing", label: "Billing", icon: "💳", badge: "Soon" },
+  { href: "/dashboard/billing", label: "Billing", icon: "💳" },
   { href: "/dashboard/help", label: "Help", icon: "❓" },
 ];
 
@@ -261,6 +261,43 @@ export default function DashboardShell({
               )}
             </div>
           </header>
+
+          {/* Global Read-Only / Expiring-Soon Plan Banner */}
+          {org.isReadOnly && (
+            <div className="border-b border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-900 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
+                <span>
+                  <strong>Read-Only Mode:</strong> Your{" "}
+                  <span className="uppercase">{org.planId}</span> plan has
+                  expired. Viewing &amp; exports work and public certificate
+                  downloads remain live, but creating or editing is disabled.
+                </span>
+                <Link
+                  href="/dashboard/billing"
+                  className="font-bold text-red-950 underline hover:no-underline"
+                >
+                  Renew / Upgrade in Billing →
+                </Link>
+              </div>
+            </div>
+          )}
+          {!org.isReadOnly && org.planExpiringSoon && (
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
+                <span>
+                  <strong>Plan Expiring Soon:</strong> Your{" "}
+                  <span className="uppercase">{org.planId}</span> plan expires
+                  soon. Renew ahead of time to avoid dashboard read-only mode.
+                </span>
+                <Link
+                  href="/dashboard/billing"
+                  className="font-bold text-amber-950 underline hover:no-underline"
+                >
+                  Open Billing →
+                </Link>
+              </div>
+            </div>
+          )}
 
           {/* Page content */}
           <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
