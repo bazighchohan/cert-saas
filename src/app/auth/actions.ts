@@ -5,11 +5,12 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import {
-  getCurrentOrg,
+  getCurrentOrgResult,
   getCurrentUser,
   provisionOrganizationForUser,
   resolveOrganizationName,
 } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export interface AuthActionResult {
@@ -143,7 +144,7 @@ export async function loginAction(input: {
   }
 
   const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.auth.signInWithPassword({
+  const { data, error } = await supabase.auth.signInWithPassword({
     email,
     password,
   });
@@ -152,12 +153,26 @@ export async function loginAction(input: {
     return { error: error.message };
   }
 
-  // Ensure the user's organization exists (auto-provisions if user had no org yet).
-  await getCurrentOrg();
+  // Ensure the user's organization exists and check if the organization is suspended.
+  const [{ org }, isSuperAdmin] = await Promise.all([
+    getCurrentOrgResult(),
+    isUserInSuperAdminsTable(data.user?.id),
+  ]);
+
+  if (org?.status === "suspended" && !isSuperAdmin) {
+    await supabase.auth.signOut();
+    return {
+      error:
+        "This organization account has been suspended. Please contact platform support.",
+    };
+  }
 
   return {
     success: true,
-    redirectTo: safeNextPath(input.next, "/dashboard"),
+    redirectTo: safeNextPath(
+      input.next,
+      org?.status === "suspended" && isSuperAdmin ? "/superadmin" : "/dashboard",
+    ),
   };
 }
 

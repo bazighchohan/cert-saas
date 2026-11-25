@@ -2,7 +2,8 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
-import { getCurrentOrg } from "@/lib/auth";
+import { getCurrentOrgResult, getCurrentUser } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -55,8 +56,22 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL("/reset-password", req.url));
   }
 
-  // Ensure the organization exists (idempotent; provisions if needed after email confirmation).
-  await getCurrentOrg();
+  // Ensure the organization exists and enforce suspension check.
+  const user = await getCurrentUser();
+  const [{ org }, isSuperAdmin] = await Promise.all([
+    getCurrentOrgResult(),
+    isUserInSuperAdminsTable(user?.id),
+  ]);
+
+  if (org?.status === "suspended" && !isSuperAdmin) {
+    await supabase.auth.signOut();
+    const loginUrl = new URL("/login", req.url);
+    loginUrl.searchParams.set(
+      "error",
+      "This organization account has been suspended. Please contact support.",
+    );
+    return NextResponse.redirect(loginUrl);
+  }
 
   return NextResponse.redirect(new URL(next, req.url));
 }

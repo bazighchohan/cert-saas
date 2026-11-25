@@ -50,6 +50,7 @@ cp .env.example .env.local      # Windows PowerShell: Copy-Item .env.example .en
 #    supabase/migrations/009_atomic_certificate_download.sql
 #    supabase/migrations/010_attendee_issue_note.sql
 #    supabase/migrations/011_billing_and_plan_enforcement.sql
+#    supabase/migrations/012_super_admins.sql
 #    (NOT the legacy schema.sql — the old single-event code is ported in the next phases)
 
 # 4. Run
@@ -87,6 +88,7 @@ supabase/migrations numbered SQL migrations — run in order in the Supabase SQL
 - [x] **5. Public event page** — `/e/[slug]` student lookup & download flow, preview cards, IP + identifier rate limiting, atomic `download_limit` enforcement (`009_atomic_certificate_download.sql`), and admin Reset Download action
 - [x] **6. Admin tracking** — Downloads tab with KPI summary cards, Recharts daily downloads chart, filterable downloaded / not-downloaded / per-type table, CSV & Excel (`.xlsx`) exports, pending-email copy, per-attendee `download_log` history, and Issues / name-correction notes (`010_attendee_issue_note.sql`)
 - [x] **6b. Billing & plan enforcement** — central `assertWithinPlan(orgId, resource)` guard, read-only mode on plan expiration while public downloads remain live, `/dashboard/billing` with usage meters, plan comparison & manual Bank/JazzCash/Easypaisa `payment_requests` + screenshot upload, atomic approval upgrade trigger/RPC, and daily Vercel Cron (`/api/cron/check-expiring-plans`, `011_billing_and_plan_enforcement.sql`)
+- [x] **6c. Platform `/superadmin` console** — gated exclusively by `public.super_admins` table (`012_super_admins.sql`, never via env password; no impersonation), platform overview with monthly revenue chart, searchable organizations list & detail, manual plan & expiry controls, payment screenshot review queue, and instant org suspension blocking both admin sessions and public `/e/[slug]` pages with full `audit_log` coverage
 - [ ] **7. Deploy** — new Vercel project, production env vars
 
 ### Legacy TODO (single-event leftovers, kept working until replaced)

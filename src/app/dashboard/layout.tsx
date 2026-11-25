@@ -42,6 +42,10 @@ export default async function DashboardLayout({
     );
   }
 
+  if (org.status !== "active") {
+    redirect("/account-suspended");
+  }
+
   return (
     <DashboardShell org={org} user={user}>
       {children}

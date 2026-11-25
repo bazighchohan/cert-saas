@@ -599,19 +599,27 @@ export default function BillingClient({
         )}
       </section>
 
-      {/* 4. Platform Super-Admin Verification Queue (only visible to SUPER_ADMIN_EMAILS) */}
+      {/* 4. Platform Super-Admin Verification Queue (only visible to public.super_admins) */}
       {isSuperAdmin && (
         <section className="overflow-hidden rounded-2xl border-2 border-indigo-200 bg-white shadow-xs">
-          <div className="border-b border-indigo-100 bg-indigo-50/60 px-6 py-4">
-            <h2 className="text-sm font-bold text-indigo-950 sm:text-base">
-              🛡️ Platform Super-Admin: Pending Upgrade Approvals (
-              {adminPendingRequests.length})
-            </h2>
-            <p className="mt-0.5 text-xs text-indigo-800">
-              Approving a request atomically updates{" "}
-              <code className="font-mono">organizations.plan_id</code> and extends{" "}
-              <code className="font-mono">plan_expires_at</code> by 30 days.
-            </p>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-indigo-100 bg-indigo-50/60 px-6 py-4">
+            <div>
+              <h2 className="text-sm font-bold text-indigo-950 sm:text-base">
+                🛡️ Platform Super-Admin: Pending Upgrade Approvals (
+                {adminPendingRequests.length})
+              </h2>
+              <p className="mt-0.5 text-xs text-indigo-800">
+                Approving a request atomically updates{" "}
+                <code className="font-mono">organizations.plan_id</code> and extends{" "}
+                <code className="font-mono">plan_expires_at</code> by 30 days.
+              </p>
+            </div>
+            <a
+              href="/superadmin/payments"
+              className="rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+            >
+              Open /superadmin Console →
+            </a>
           </div>
 
           {adminPendingRequests.length === 0 ? (

@@ -1,8 +1,8 @@
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
-import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
-import { isSuperAdminEmail } from "@/lib/dashboard-data";
+import { getCurrentOrgResult, getCurrentUser } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -10,17 +10,21 @@ export const runtime = "nodejs";
 /**
  * GET /api/dashboard/billing/payment-requests/[requestId]/screenshot
  * Streams the payment receipt image/PDF from the private `payment-proofs` bucket.
- * Strictly restricted to members of the owning organization OR platform super-admins.
+ * Strictly restricted to members of the owning active organization OR users in `public.super_admins`.
  */
 export async function GET(
   _req: NextRequest,
   context: { params: Promise<{ requestId: string }> },
 ) {
   const user = await getCurrentUser();
-  const org = await getCurrentOrg();
-  if (!user || !org) {
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const [{ org }, isSuperAdmin] = await Promise.all([
+    getCurrentOrgResult(),
+    isUserInSuperAdminsTable(user.id),
+  ]);
 
   const { requestId } = await context.params;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
@@ -39,7 +43,8 @@ export async function GET(
   }
 
   const canView =
-    reqRow.org_id === org.id || isSuperAdminEmail(user.email);
+    isSuperAdmin ||
+    (Boolean(org) && org!.status === "active" && reqRow.org_id === org!.id);
   if (!canView) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }

@@ -474,17 +474,22 @@ export const getCurrentOrgResult = cache(
 );
 
 /**
- * Returns the current logged-in user's organization, or null if unauthenticated
- * or provisioning failed.
+ * Returns the current logged-in user's ACTIVE organization, or null if
+ * unauthenticated, provisioning failed, or the organization is suspended.
+ * All `/api/dashboard/**` routes and dashboard Server Actions call this helper,
+ * so suspending an organization blocks every dashboard API/mutation at once.
  */
 export const getCurrentOrg = cache(async (): Promise<CurrentOrg | null> => {
   const { org } = await getCurrentOrgResult();
+  if (!org || org.status !== "active") {
+    return null;
+  }
   return org;
 });
 
 /**
- * Helper for /dashboard/** Server Components and Server Actions.
- * Redirects unauthenticated users to /login.
+ * Helper for /dashboard/** Server Components.
+ * Redirects unauthenticated users to /login and suspended organizations to /account-suspended.
  */
 export async function requireDashboardAuth(): Promise<{
   user: CurrentUser;
@@ -499,6 +504,9 @@ export async function requireDashboardAuth(): Promise<{
     throw new Error(
       error || "Your organization could not be set up automatically.",
     );
+  }
+  if (org.status !== "active") {
+    redirect("/account-suspended");
   }
   return { user, org };
 }

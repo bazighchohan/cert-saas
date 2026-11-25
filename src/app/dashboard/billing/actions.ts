@@ -1,8 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { getCurrentUser } from "@/lib/auth";
-import { isSuperAdminEmail } from "@/lib/dashboard-data";
+import { getCurrentSuperAdmin } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export interface ReviewPaymentResult {
@@ -12,9 +11,7 @@ export interface ReviewPaymentResult {
 
 /**
  * Platform super-admin action to approve or reject a pending `payment_requests` row.
- * Gated by `SUPER_ADMIN_EMAILS`. Calls `review_payment_request` RPC so approving
- * atomically upgrades `organizations.plan_id`, extends `plan_expires_at`, and
- * writes `billing.plan_upgraded` to `audit_log`.
+ * Gated strictly by membership in `public.super_admins` (never via env password).
  */
 export async function reviewPaymentRequestAction(input: {
   requestId: string;
@@ -22,11 +19,11 @@ export async function reviewPaymentRequestAction(input: {
   reviewerNote?: string;
   billingDays?: number;
 }): Promise<ReviewPaymentResult> {
-  const user = await getCurrentUser();
-  if (!user || !isSuperAdminEmail(user.email)) {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
     return {
       error:
-        "Unauthorized: only platform super-admins (configured in SUPER_ADMIN_EMAILS) can review payment requests.",
+        "Unauthorized: only users listed in public.super_admins can review payment requests.",
     };
   }
 
@@ -40,10 +37,10 @@ export async function reviewPaymentRequestAction(input: {
   );
   const admin = getSupabaseAdmin();
 
-  const { error } = await admin.rpc("review_payment_request", {
+  const { data: rpcRows, error } = await admin.rpc("review_payment_request", {
     p_request_id: input.requestId,
     p_decision: input.decision,
-    p_reviewer: user.email,
+    p_reviewer: superAdmin.email,
     p_note: input.reviewerNote?.trim() || null,
     p_billing_days: billingDays,
   });
@@ -52,7 +49,33 @@ export async function reviewPaymentRequestAction(input: {
     return { error: error.message };
   }
 
+  const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | { org_id?: string; plan_id?: string }
+    | undefined;
+
+  if (row?.org_id) {
+    try {
+      await admin.from("audit_log").insert({
+        org_id: row.org_id,
+        user_id: superAdmin.id,
+        action:
+          input.decision === "approved"
+            ? "superadmin.payment_approved"
+            : "superadmin.payment_rejected",
+        details: {
+          payment_request_id: input.requestId,
+          plan_id: row.plan_id ?? null,
+          billing_days: billingDays,
+          reviewer_note: input.reviewerNote?.trim() || null,
+        },
+      });
+    } catch {
+      // Non-fatal if audit_log already recorded by trigger
+    }
+  }
+
   revalidatePath("/dashboard/billing");
+  revalidatePath("/superadmin", "layout");
   revalidatePath("/dashboard", "layout");
   return { success: true };
 }

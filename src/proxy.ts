@@ -49,22 +49,31 @@ export async function proxy(req: NextRequest) {
     isLoggedIn = Boolean(user);
   }
 
-  // Logged-in users visiting /login or /signup go straight to /dashboard.
+  // Logged-in users visiting /login or /signup go straight to their requested destination or /dashboard.
   if (isLoggedIn && (pathname === "/login" || pathname === "/signup")) {
-    const dest = new URL("/dashboard", req.url);
-    return NextResponse.redirect(dest);
+    const requestedNext = req.nextUrl.searchParams.get("next");
+    const safeDest =
+      requestedNext &&
+      requestedNext.startsWith("/") &&
+      !requestedNext.startsWith("//")
+        ? requestedNext
+        : "/dashboard";
+    return NextResponse.redirect(new URL(safeDest, req.url));
   }
 
   const isProtectedPage =
     pathname === "/dashboard" ||
     pathname.startsWith("/dashboard/") ||
+    pathname === "/superadmin" ||
+    pathname.startsWith("/superadmin/") ||
     pathname === "/admin" ||
     pathname.startsWith("/admin/");
 
   const isProtectedApi =
     ((pathname === "/api/admin" || pathname.startsWith("/api/admin/")) &&
       pathname !== "/api/admin/logout") ||
-    pathname.startsWith("/api/dashboard/");
+    pathname.startsWith("/api/dashboard/") ||
+    pathname.startsWith("/api/superadmin/");
 
   if (!isLoggedIn && isProtectedApi) {
     return NextResponse.json(
@@ -86,6 +95,8 @@ export const config = {
   matcher: [
     "/dashboard",
     "/dashboard/:path*",
+    "/superadmin",
+    "/superadmin/:path*",
     "/login",
     "/signup",
     "/forgot-password",
@@ -95,5 +106,6 @@ export const config = {
     "/api/admin",
     "/api/admin/:path*",
     "/api/dashboard/:path*",
+    "/api/superadmin/:path*",
   ],
 };

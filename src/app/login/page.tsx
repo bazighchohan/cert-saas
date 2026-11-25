@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { getCurrentOrgResult, getCurrentUser } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import LoginForm from "./LoginForm";
 
 export const dynamic = "force-dynamic";
@@ -9,12 +10,22 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<{ next?: string; error?: string }>;
 }) {
+  const { next, error } = await searchParams;
   const user = await getCurrentUser();
   if (user) {
-    redirect("/dashboard");
+    const [{ org }, isSuperAdmin] = await Promise.all([
+      getCurrentOrgResult(),
+      isUserInSuperAdminsTable(user.id),
+    ]);
+    if (org?.status === "suspended" && !isSuperAdmin) {
+      redirect("/account-suspended");
+    }
+    const safeDest =
+      next && next.startsWith("/") && !next.startsWith("//")
+        ? next
+        : "/dashboard";
+    redirect(safeDest);
   }
-
-  const { next, error } = await searchParams;
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center bg-slate-50 px-4 py-12">

@@ -5,7 +5,7 @@ import {
   createPublicLookupToken,
   escapeIlikeExact,
   GENERIC_LOOKUP_ERROR,
-  getPublicEventBySlug,
+  getPublicEventPageState,
   normalizeForLookup,
 } from "@/lib/public-event";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
@@ -108,13 +108,23 @@ export async function POST(
     );
   }
 
-  const event = await getPublicEventBySlug(slug);
-  if (!event) {
+  const pageState = await getPublicEventPageState(slug);
+  if (pageState.state === "not_found") {
     return NextResponse.json(
       { error: "Event not found.", code: "EVENT_NOT_FOUND" },
       { status: 404, headers: { "Cache-Control": "no-store" } },
     );
   }
+  if (pageState.state === "unavailable") {
+    return NextResponse.json(
+      {
+        error: "This event page is currently unavailable.",
+        code: "EVENT_UNAVAILABLE",
+      },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const { event } = pageState;
 
   if (!event.released) {
     return NextResponse.json(

@@ -2,6 +2,7 @@ import "server-only";
 
 import { cache } from "react";
 import { requireDashboardAuth, type CurrentOrg, type CurrentUser } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -49,16 +50,6 @@ export interface BillingDashboardData extends OrgUsageSummary {
   paymentRequests: PaymentRequestRow[];
   isSuperAdmin: boolean;
   adminPendingRequests: PaymentRequestRow[];
-}
-
-export function isSuperAdminEmail(email: string | null | undefined): boolean {
-  if (!email) return false;
-  const raw = process.env.SUPER_ADMIN_EMAILS || "";
-  const allowed = raw
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  return allowed.includes(email.trim().toLowerCase());
 }
 
 export interface CertificateTypeRow {
@@ -419,7 +410,7 @@ export async function getBillingDashboardData(): Promise<BillingDashboardData> {
   const usage = await getOrgPlanAndUsage();
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
-  const superAdmin = isSuperAdminEmail(usage.user.email);
+  const superAdmin = await isUserInSuperAdminsTable(usage.user.id);
 
   const [plansRes, orgReqsRes, adminReqsRes] = await Promise.all([
     supabase

@@ -203,6 +203,16 @@ export async function POST(
     };
 
     if (!claimRow?.claimed) {
+      if (claimRow?.reason === "org_suspended") {
+        return NextResponse.json(
+          {
+            error: "This event page is currently unavailable.",
+            code: "EVENT_UNAVAILABLE",
+          },
+          { status: 403, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+
       if (claimRow?.reason === "not_released") {
         return NextResponse.json(
           {

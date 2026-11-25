@@ -2,7 +2,7 @@ import "server-only";
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPublicEventBySlug } from "@/lib/public-event";
+import { getPublicEventPageState } from "@/lib/public-event";
 import PublicEventPortalClient from "./PublicEventPortalClient";
 
 export const dynamic = "force-dynamic";
@@ -13,10 +13,14 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const event = await getPublicEventBySlug(slug);
-  if (!event) {
+  const pageState = await getPublicEventPageState(slug);
+  if (pageState.state === "not_found") {
     return { title: "Event Not Found" };
   }
+  if (pageState.state === "unavailable") {
+    return { title: "Event Unavailable | cert-saas" };
+  }
+  const { event } = pageState;
   return {
     title: `${event.title} — ${event.orgName} | E-Certificate Portal`,
     description:
@@ -31,11 +35,36 @@ export default async function PublicEventPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const event = await getPublicEventBySlug(slug);
+  const pageState = await getPublicEventPageState(slug);
 
-  if (!event) {
+  if (pageState.state === "not_found") {
     notFound();
   }
+
+  if (pageState.state === "unavailable") {
+    return (
+      <main className="flex min-h-dvh flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 px-4 py-12 text-slate-900">
+        <section
+          role="alert"
+          className="mx-auto w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-sm ring-1 ring-slate-200"
+        >
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-red-50 text-2xl text-red-600 ring-1 ring-red-100">
+            🚫
+          </div>
+          <h1 className="text-lg font-bold text-slate-900">
+            This event page is currently unavailable
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            Certificates for <strong>{pageState.title}</strong> are currently
+            unavailable because the issuing organization&apos;s account is
+            suspended.
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  const { event } = pageState;
 
   return (
     <main className="flex min-h-dvh flex-col justify-between bg-gradient-to-b from-slate-50 to-slate-100 px-4 py-10 text-slate-900 sm:py-14">

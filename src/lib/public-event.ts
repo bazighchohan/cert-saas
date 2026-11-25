@@ -71,16 +71,22 @@ export function verifyPublicLookupToken(
   return verifyLookupTokenWithSecret(token, getSigningSecret());
 }
 
+export type PublicEventPageState =
+  | { state: "not_found" }
+  | { state: "unavailable"; title: string; orgName: string }
+  | { state: "ok"; event: PublicEventInfo };
+
 /**
- * Fetches public event metadata + active organization name by event slug.
- * Returns null if the event does not exist or its organization is suspended.
+ * Resolves the public `/e/[slug]` state, distinguishing between a non-existent
+ * slug (`not_found`), a suspended organization (`unavailable`), and an active
+ * organization (`ok`).
  */
-export async function getPublicEventBySlug(
+export async function getPublicEventPageState(
   rawSlug: string,
-): Promise<PublicEventInfo | null> {
+): Promise<PublicEventPageState> {
   const slug = rawSlug.trim().toLowerCase();
   if (!slug || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-    return null;
+    return { state: "not_found" };
   }
 
   const admin = getSupabaseAdmin();
@@ -90,15 +96,25 @@ export async function getPublicEventBySlug(
     .eq("slug", slug)
     .maybeSingle();
 
-  if (error || !data) return null;
+  if (error || !data) {
+    return { state: "not_found" };
+  }
 
   const row = data as Record<string, unknown>;
   const orgRel = Array.isArray(row.organizations)
     ? (row.organizations[0] as Record<string, unknown> | undefined)
     : (row.organizations as Record<string, unknown> | undefined);
 
-  if (!orgRel || orgRel.status !== "active") {
-    return null;
+  if (!orgRel) {
+    return { state: "not_found" };
+  }
+
+  if (orgRel.status !== "active") {
+    return {
+      state: "unavailable",
+      title: String(row.title ?? "Event"),
+      orgName: String(orgRel.name ?? "Organization"),
+    };
   }
 
   const qrPosRaw = String(row.qr_position ?? "bottom-right");
@@ -113,29 +129,43 @@ export async function getPublicEventBySlug(
     : "bottom-right";
 
   return {
-    id: row.id as string,
-    orgId: orgRel.id as string,
-    orgName: orgRel.name as string,
-    orgSlug: orgRel.slug as string,
-    title: row.title as string,
-    subtitle: (row.subtitle as string | null) ?? null,
-    slug: row.slug as string,
-    eventDate: (row.event_date as string | null) ?? null,
-    contactEmail: (row.contact_email as string | null) ?? null,
-    contactPhone: (row.contact_phone as string | null) ?? null,
-    released: Boolean(row.released),
-    identifierLabel:
-      (row.identifier_label as string) ?? "Registration number",
-    requireNameMatch: Boolean(row.require_name_match),
-    downloadLimit:
-      row.download_limit === null || row.download_limit === undefined
-        ? null
-        : Number(row.download_limit),
-    showQr: Boolean(row.show_qr ?? false),
-    qrPosition,
-    qrSizePt:
-      row.qr_size !== null && row.qr_size !== undefined
-        ? Number(row.qr_size)
-        : 54,
+    state: "ok",
+    event: {
+      id: row.id as string,
+      orgId: orgRel.id as string,
+      orgName: orgRel.name as string,
+      orgSlug: orgRel.slug as string,
+      title: row.title as string,
+      subtitle: (row.subtitle as string | null) ?? null,
+      slug: row.slug as string,
+      eventDate: (row.event_date as string | null) ?? null,
+      contactEmail: (row.contact_email as string | null) ?? null,
+      contactPhone: (row.contact_phone as string | null) ?? null,
+      released: Boolean(row.released),
+      identifierLabel:
+        (row.identifier_label as string) ?? "Registration number",
+      requireNameMatch: Boolean(row.require_name_match),
+      downloadLimit:
+        row.download_limit === null || row.download_limit === undefined
+          ? null
+          : Number(row.download_limit),
+      showQr: Boolean(row.show_qr ?? false),
+      qrPosition,
+      qrSizePt:
+        row.qr_size !== null && row.qr_size !== undefined
+          ? Number(row.qr_size)
+          : 54,
+    },
   };
+}
+
+/**
+ * Fetches public event metadata + active organization name by event slug.
+ * Returns null if the event does not exist or its organization is suspended.
+ */
+export async function getPublicEventBySlug(
+  rawSlug: string,
+): Promise<PublicEventInfo | null> {
+  const res = await getPublicEventPageState(rawSlug);
+  return res.state === "ok" ? res.event : null;
 }
