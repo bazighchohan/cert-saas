@@ -16,6 +16,7 @@ import type {
 } from "@/app/api/dashboard/events/[eventId]/attendees/route";
 import { validateAttendeeFields } from "@/lib/attendee-validation";
 import type { CertificateTypeRow } from "@/lib/dashboard-data";
+import ImportWizardModal from "./ImportWizardModal";
 import {
   addAttendeeAction,
   bulkDeleteAttendeesAction,
@@ -74,6 +75,7 @@ export default function AttendeesTabClient({
 
   // Add Attendee Form state
   const [addFormOpen, setAddFormOpen] = useState(false);
+  const [importModalOpen, setImportModalOpen] = useState(false);
   const [newIdentifier, setNewIdentifier] = useState("");
   const [newFullName, setNewFullName] = useState("");
   const [newEmail, setNewEmail] = useState("");
@@ -521,6 +523,20 @@ export default function AttendeesTabClient({
               </strong>{" "}
               ({quota.planName})
             </span>
+            <a
+              href={`/api/dashboard/events/${eventId}/import/sample-csv`}
+              download
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50"
+            >
+              ⬇ Sample CSV
+            </a>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setImportModalOpen(true)}
+            >
+              📤 Import CSV / Excel
+            </Button>
             <Button
               variant={addFormOpen ? "secondary" : "primary"}
               size="sm"
@@ -782,11 +798,22 @@ export default function AttendeesTabClient({
         <EmptyState
           icon="👥"
           title="No attendees added yet"
-          description={`Add attendees manually using the button above (or via CSV import in the next step). Each attendee is uniquely identified by ${identifierLabel}.`}
+          description={`Import attendees from any CSV or Excel (.xlsx) spreadsheet, or add them manually. Each attendee is uniquely identified by ${identifierLabel}.`}
           action={
-            <Button variant="primary" onClick={() => setAddFormOpen(true)}>
-              + Add First Attendee
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-2.5">
+              <Button
+                variant="primary"
+                onClick={() => setImportModalOpen(true)}
+              >
+                📤 Import CSV / Excel
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => setAddFormOpen(true)}
+              >
+                + Add Manually
+              </Button>
+            </div>
           }
         />
       ) : (
@@ -1167,6 +1194,19 @@ export default function AttendeesTabClient({
         confirmLabel={`Delete ${selectedIds.size} Attendee${selectedIds.size === 1 ? "" : "s"}`}
         danger
         loading={bulkDeleting}
+      />
+
+      {/* Multi-step CSV / XLSX Import Wizard Modal */}
+      <ImportWizardModal
+        open={importModalOpen}
+        onClose={() => setImportModalOpen(false)}
+        onImportComplete={() => {
+          void fetchAttendees();
+          router.refresh();
+        }}
+        eventId={eventId}
+        identifierLabel={identifierLabel}
+        certificateTypes={certificateTypes}
       />
     </div>
   );

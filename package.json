@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test src/lib/certificates/__tests__/generator.test.ts"
+    "test": "tsx --test src/lib/certificates/__tests__/generator.test.ts src/lib/__tests__/tabular-import.test.ts"
   },
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
@@ -19,7 +19,8 @@
     "pdfjs-dist": "^6.5.438",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.5",
