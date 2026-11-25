@@ -2,8 +2,13 @@ import "server-only";
 
 import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
-import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  getCurrentOrgResult,
+  getCurrentUser,
+  resolveOrganizationName,
+} from "@/lib/auth";
 import DashboardShell from "./DashboardShell";
+import ProvisionOrgErrorCard from "./ProvisionOrgErrorCard";
 
 export const dynamic = "force-dynamic";
 
@@ -17,9 +22,24 @@ export default async function DashboardLayout({
     redirect("/login");
   }
 
-  const org = await getCurrentOrg();
+  const { org, error } = await getCurrentOrgResult();
   if (!org) {
-    redirect("/login?error=Could+not+load+your+organization");
+    const defaultOrgName = resolveOrganizationName({
+      explicitName: user.orgNameFromMeta,
+      userMetadata: user.userMetadata,
+      email: user.email,
+    });
+
+    return (
+      <ProvisionOrgErrorCard
+        userEmail={user.email}
+        defaultOrgName={defaultOrgName}
+        initialError={
+          error ||
+          "Could not automatically create or load your organization. Click Retry below."
+        }
+      />
+    );
   }
 
   return (

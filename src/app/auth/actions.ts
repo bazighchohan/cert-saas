@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import type { EmailOtpType } from "@supabase/supabase-js";
@@ -7,6 +8,7 @@ import {
   getCurrentOrg,
   getCurrentUser,
   provisionOrganizationForUser,
+  resolveOrganizationName,
 } from "@/lib/auth";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -20,16 +22,21 @@ export interface AuthActionResult {
 
 async function getAppOrigin(): Promise<string> {
   const configured = process.env.NEXT_PUBLIC_APP_URL?.trim();
-  if (configured) {
+  if (configured && !configured.includes(".supabase.co")) {
     return configured.replace(/\/+$/, "");
   }
   const h = await headers();
   const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
-  const proto = h.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
+  const proto =
+    h.get("x-forwarded-proto") ||
+    (host.startsWith("localhost") ? "http" : "https");
   return `${proto}://${host}`;
 }
 
-function safeNextPath(next: string | null | undefined, fallback = "/dashboard"): string {
+function safeNextPath(
+  next: string | null | undefined,
+  fallback = "/dashboard",
+): string {
   if (!next || typeof next !== "string") return fallback;
   if (!next.startsWith("/") || next.startsWith("//")) return fallback;
   return next;
@@ -40,11 +47,11 @@ export async function signupAction(input: {
   email: string;
   password: string;
 }): Promise<AuthActionResult> {
-  const orgName = input.orgName.trim();
+  const rawOrgName = input.orgName.trim();
   const email = input.email.trim().toLowerCase();
   const password = input.password;
 
-  if (orgName.length < 2 || orgName.length > 200) {
+  if (rawOrgName.length < 2 || rawOrgName.length > 200) {
     return { error: "Organization name must be between 2 and 200 characters." };
   }
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -54,19 +61,30 @@ export async function signupAction(input: {
     return { error: "Password must be at least 8 characters." };
   }
 
+  const orgName = resolveOrganizationName({
+    explicitName: rawOrgName,
+    email,
+  });
+
   const origin = await getAppOrigin();
   const supabase = await createSupabaseServerClient();
 
+  // Pass organization_name in options.data (user_metadata) so it survives
+  // email confirmation links and future logins.
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
-      data: { org_name: orgName },
+      data: {
+        organization_name: orgName,
+        org_name: orgName,
+      },
       emailRedirectTo: `${origin}/auth/callback?next=/dashboard`,
     },
   });
 
   if (error) {
+    console.error("[auth:signupAction] Supabase signUp error:", error);
     return { error: error.message };
   }
 
@@ -77,15 +95,28 @@ export async function signupAction(input: {
   // Supabase returns an obfuscated user with empty identities if the email is already registered
   // while email confirmations are enabled.
   if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
-    return { error: "An account with this email already exists. Please sign in instead." };
+    return {
+      error: "An account with this email already exists. Please sign in instead.",
+    };
   }
 
-  // Provision the organization, owner membership, and Free plan in one DB transaction.
+  // Provision the organization, owner membership, and Free plan atomically & idempotently.
   try {
-    await provisionOrganizationForUser(data.user.id, orgName, email);
+    await provisionOrganizationForUser(
+      data.user.id,
+      orgName,
+      email,
+      data.user.user_metadata as Record<string, unknown> | undefined,
+    );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to create organization.";
-    return { error: message };
+    console.error("[auth:signupAction] Organization provisioning failed:", err);
+    // If email confirmation is required, the user will auto-provision on callback/login;
+    // if immediate session was created, surface the error or let dashboard retry page handle it.
+    if (data.session) {
+      const message =
+        err instanceof Error ? err.message : "Failed to create organization.";
+      return { error: message };
+    }
   }
 
   if (data.session) {
@@ -121,13 +152,54 @@ export async function loginAction(input: {
     return { error: error.message };
   }
 
-  // Ensure the user's organization exists (or auto-provisions from signup metadata).
+  // Ensure the user's organization exists (auto-provisions if user had no org yet).
   await getCurrentOrg();
 
   return {
     success: true,
     redirectTo: safeNextPath(input.next, "/dashboard"),
   };
+}
+
+/**
+ * Allows a logged-in user whose auto-provisioning failed to retry creating
+ * their organization directly from the dashboard error view.
+ */
+export async function retryProvisionOrganizationAction(input?: {
+  orgName?: string;
+}): Promise<AuthActionResult> {
+  const user = await getCurrentUser();
+  if (!user) {
+    return { error: "Your session has expired. Please sign in again." };
+  }
+
+  const resolvedName = resolveOrganizationName({
+    explicitName: input?.orgName,
+    userMetadata: user.userMetadata,
+    email: user.email,
+  });
+
+  try {
+    await provisionOrganizationForUser(
+      user.id,
+      resolvedName,
+      user.email,
+      user.userMetadata,
+    );
+    revalidatePath("/dashboard", "layout");
+    return { success: true, redirectTo: "/dashboard" };
+  } catch (err) {
+    console.error(
+      "[auth:retryProvisionOrganizationAction] Provisioning retry failed:",
+      err,
+    );
+    return {
+      error:
+        err instanceof Error
+          ? err.message
+          : "Could not set up your organization. Please try again.",
+    };
+  }
 }
 
 export async function logoutAction(): Promise<never> {
@@ -171,8 +243,6 @@ export async function resetPasswordAction(input: {
 
   const supabase = await createSupabaseServerClient();
 
-  // If the reset link arrived directly on /reset-password with a code or token_hash,
-  // exchange it first if not already exchanged.
   let user = await getCurrentUser();
   if (!user && code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
@@ -190,7 +260,8 @@ export async function resetPasswordAction(input: {
 
   if (!user) {
     return {
-      error: "Your password reset session has expired. Please request a new reset link.",
+      error:
+        "Your password reset session has expired. Please request a new reset link.",
     };
   }
 
