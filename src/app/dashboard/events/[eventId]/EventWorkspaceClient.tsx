@@ -18,6 +18,7 @@ import {
 import type { EventDetail } from "@/lib/dashboard-data";
 import { validateEventSlug } from "@/lib/event-validation";
 import AttendeesTabClient from "./AttendeesTabClient";
+import DownloadsTabClient from "./DownloadsTabClient";
 import TemplateTabClient from "./TemplateTabClient";
 
 export type EventTab =
@@ -505,10 +506,10 @@ export default function EventWorkspaceClient({
 
       {/* 4. DOWNLOADS TAB */}
       {activeTab === "downloads" && (
-        <EmptyState
-          icon="📥"
-          title={`Download Logs (${event.certificatesDownloadedCount} downloaded)`}
-          description="Track which attendees have downloaded their certificate, view timestamps, and export downloaded / pending lists as CSV."
+        <DownloadsTabClient
+          eventId={event.id}
+          identifierLabel={event.identifierLabel}
+          certificateTypes={event.certificateTypes}
         />
       )}
 

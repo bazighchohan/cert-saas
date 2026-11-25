@@ -896,3 +896,89 @@ export async function resetAttendeeDownloadsAction(input: {
   revalidatePath(`/dashboard/events/${input.eventId}`);
   return { success: true, affectedCount: resetCount };
 }
+
+/**
+ * Updates the "Issues" / name-correction note field (`attendees.issue_note`)
+ * so admins can record why an attendee's name or certificate was corrected.
+ * Writes `attendee.issue_note_updated` to `audit_log`.
+ */
+export async function saveAttendeeIssueNoteAction(input: {
+  eventId: string;
+  attendeeId: string;
+  issueNote: string;
+}): Promise<AttendeeActionResult> {
+  const user = await getCurrentUser();
+  const org = await getCurrentOrg();
+  if (!user || !org) {
+    return { error: "You must be signed in." };
+  }
+
+  const cleanIssue = input.issueNote.trim();
+  if (cleanIssue.length > 1000) {
+    return {
+      error: "Issue note cannot exceed 1,000 characters.",
+      code: "VALIDATION_ERROR",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const admin = getSupabaseAdmin();
+
+  const { data: existing } = await supabase
+    .from("attendees")
+    .select("id, identifier, full_name, note")
+    .eq("id", input.attendeeId)
+    .eq("event_id", input.eventId)
+    .eq("org_id", org.id)
+    .maybeSingle();
+
+  if (!existing) {
+    return { error: "Attendee not found.", code: "NOT_FOUND" };
+  }
+
+  let { error: updateErr } = await supabase
+    .from("attendees")
+    .update({
+      issue_note: cleanIssue ? cleanIssue : null,
+    })
+    .eq("id", input.attendeeId)
+    .eq("event_id", input.eventId)
+    .eq("org_id", org.id);
+
+  // Graceful fallback to `note` if 010_attendee_issue_note.sql hasn't been run in Supabase yet
+  if (updateErr && /issue_note/i.test(updateErr.message)) {
+    const fallback = await supabase
+      .from("attendees")
+      .update({
+        note: cleanIssue ? `[Issue] ${cleanIssue}` : existing.note,
+      })
+      .eq("id", input.attendeeId)
+      .eq("event_id", input.eventId)
+      .eq("org_id", org.id);
+    updateErr = fallback.error;
+  }
+
+  if (updateErr) {
+    return { error: updateErr.message || "Failed to save issue note." };
+  }
+
+  try {
+    await admin.from("audit_log").insert({
+      org_id: org.id,
+      user_id: user.id,
+      action: "attendee.issue_note_updated",
+      details: {
+        event_id: input.eventId,
+        attendee_id: input.attendeeId,
+        identifier: existing.identifier,
+        full_name: existing.full_name,
+        issue_note: cleanIssue || null,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to write audit_log for issue_note_updated:", err);
+  }
+
+  revalidatePath(`/dashboard/events/${input.eventId}`);
+  return { success: true, attendeeId: input.attendeeId };
+}

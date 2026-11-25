@@ -48,6 +48,7 @@ cp .env.example .env.local      # Windows PowerShell: Copy-Item .env.example .en
 #    supabase/migrations/007_event_identifier_settings.sql
 #    supabase/migrations/008_bulk_import_attendees.sql
 #    supabase/migrations/009_atomic_certificate_download.sql
+#    supabase/migrations/010_attendee_issue_note.sql
 #    (NOT the legacy schema.sql — the old single-event code is ported in the next phases)
 
 # 4. Run
@@ -83,7 +84,7 @@ supabase/migrations numbered SQL migrations — run in order in the Supabase SQL
 - [x] **3. Events & Attendees** — create/edit/release/delete events; paginated/searchable/sortable Attendees tab (50/page) + arbitrary CSV/XLSX import wizard up to 5,000 rows (`007_event_identifier_settings.sql`, `008_bulk_import_attendees.sql`)
 - [x] **4. Templates** — upload PDF/PNG/JPG to private Storage (`004_storage_templates.sql`), visual click-to-place name-box editor (`005_name_placement_pts.sql`, `pdfjs-dist` canvas, curated TTF fonts including script & Urdu/Arabic, test PDF generator)
 - [x] **5. Public event page** — `/e/[slug]` student lookup & download flow, preview cards, IP + identifier rate limiting, atomic `download_limit` enforcement (`009_atomic_certificate_download.sql`), and admin Reset Download action
-- [ ] **6. Admin tracking** — downloaded / not-downloaded views and CSV export
+- [x] **6. Admin tracking** — Downloads tab with KPI summary cards, Recharts daily downloads chart, filterable downloaded / not-downloaded / per-type table, CSV & Excel (`.xlsx`) exports, pending-email copy, per-attendee `download_log` history, and Issues / name-correction notes (`010_attendee_issue_note.sql`)
 - [ ] **7. Deploy** — new Vercel project, production env vars
 
 ### Legacy TODO (single-event leftovers, kept working until replaced)
