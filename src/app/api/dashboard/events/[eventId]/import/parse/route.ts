@@ -6,6 +6,8 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import { UuidSchema } from "@/lib/schemas";
+import { checkCsrfOrigin, sanitizeClientErrorMessage } from "@/lib/security";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
   autoDetectColumnMapping,
@@ -13,6 +15,9 @@ import {
 } from "@/lib/tabular-import";
 
 export const runtime = "nodejs";
+
+const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024; // 10 MB max upload for CSV / XLSX
+const ALLOWED_IMPORT_EXTENSIONS = new Set(["csv", "tsv", "txt", "xlsx", "xls"]);
 
 /**
  * POST /api/dashboard/events/[eventId]/import/parse
@@ -24,6 +29,17 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_IMPORT_FILE_BYTES + 256 * 1024) {
+    return NextResponse.json(
+      { error: "Uploaded spreadsheet exceeds the 10 MB size limit." },
+      { status: 413 },
+    );
+  }
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
@@ -42,7 +58,12 @@ export async function POST(
     throw err;
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const [eventRes, typesRes] = await Promise.all([
@@ -75,9 +96,22 @@ export async function POST(
   }
 
   const file = formData.get("file");
-  if (!(file instanceof File)) {
+  if (!(file instanceof File) || file.size === 0) {
     return NextResponse.json(
-      { error: "Please select a .csv or .xlsx file to upload." },
+      { error: "Please select a non-empty .csv or .xlsx file to upload." },
+      { status: 400 },
+    );
+  }
+  if (file.size > MAX_IMPORT_FILE_BYTES) {
+    return NextResponse.json(
+      { error: "Uploaded spreadsheet exceeds the 10 MB maximum size limit." },
+      { status: 413 },
+    );
+  }
+  const ext = file.name.split(".").pop()?.trim().toLowerCase() ?? "";
+  if (!ALLOWED_IMPORT_EXTENSIONS.has(ext)) {
+    return NextResponse.json(
+      { error: "Unsupported file type. Upload a .csv, .tsv, or .xlsx file." },
       { status: 400 },
     );
   }
@@ -112,10 +146,10 @@ export async function POST(
   } catch (err) {
     return NextResponse.json(
       {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Could not parse the uploaded file.",
+        error: sanitizeClientErrorMessage(
+          err,
+          "Could not parse the uploaded file.",
+        ),
       },
       { status: 400 },
     );

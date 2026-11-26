@@ -8,7 +8,9 @@ import {
   getPublicEventPageState,
   normalizeForLookup,
 } from "@/lib/public-event";
-import { clientIp, rateLimit } from "@/lib/rate-limit";
+import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
+import { EventSlugParamSchema, PublicLookupBodySchema } from "@/lib/schemas";
+import { parseValidatedJson } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -41,11 +43,19 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ slug: string }> },
 ) {
-  const { slug } = await context.params;
+  const { slug: rawSlug } = await context.params;
+  const slugParsed = EventSlugParamSchema.safeParse(rawSlug);
+  if (!slugParsed.success) {
+    return NextResponse.json(
+      { error: "Event not found.", code: "EVENT_NOT_FOUND" },
+      { status: 404, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const slug = slugParsed.data;
   const ip = clientIp(req);
 
-  // 1. Rate limit by IP
-  const ipRl = rateLimit(`pub:lookup:ip:${ip}`, IP_LIMIT, WINDOW_MS);
+  // 1. Distributed rate limit by IP
+  const ipRl = await enforceRateLimit(`pub:lookup:ip:${ip}`, IP_LIMIT, WINDOW_MS);
   if (!ipRl.ok) {
     return NextResponse.json(
       {
@@ -62,22 +72,13 @@ export async function POST(
     );
   }
 
-  let body: { identifier?: unknown; fullName?: unknown };
-  try {
-    body = (await req.json()) as { identifier?: unknown; fullName?: unknown };
-  } catch {
-    return NextResponse.json(
-      { error: "Please enter your details and try again.", code: "BAD_REQUEST" },
-      { status: 400, headers: { "Cache-Control": "no-store" } },
-    );
+  const parsedBody = await parseValidatedJson(req, PublicLookupBodySchema, 16 * 1024);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
 
-  const rawIdentifier =
-    typeof body.identifier === "string" ? body.identifier : "";
-  const rawFullName = typeof body.fullName === "string" ? body.fullName : "";
-
-  const normId = normalizeForLookup(rawIdentifier);
-  const normName = normalizeForLookup(rawFullName);
+  const normId = normalizeForLookup(parsedBody.data.identifier);
+  const normName = normalizeForLookup(parsedBody.data.fullName);
 
   if (!normId || normId.length > 100) {
     return NextResponse.json(
@@ -86,9 +87,9 @@ export async function POST(
     );
   }
 
-  // 2. Rate limit by identifier within this event
-  const idRl = rateLimit(
-    `pub:lookup:id:${slug.toLowerCase()}:${normId}`,
+  // 2. Distributed rate limit by identifier within this event
+  const idRl = await enforceRateLimit(
+    `pub:lookup:id:${slug}:${normId}`,
     ID_LIMIT,
     WINDOW_MS,
   );

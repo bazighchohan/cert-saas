@@ -7,12 +7,16 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import { ImportConfirmBodySchema, UuidSchema } from "@/lib/schemas";
+import {
+  checkCsrfOrigin,
+  MAX_IMPORT_JSON_BODY_BYTES,
+  parseValidatedJson,
+  sanitizeClientErrorMessage,
+} from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import {
-  MAX_IMPORT_ROWS,
-  type PreparedImportRow,
-} from "@/lib/tabular-import";
+import type { PreparedImportRow } from "@/lib/tabular-import";
 
 export const runtime = "nodejs";
 
@@ -26,6 +30,9 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
@@ -44,41 +51,26 @@ export async function POST(
     throw err;
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  let body: {
-    preparedRows?: PreparedImportRow[];
-    mode?: "skip" | "update";
-  };
-  try {
-    body = (await req.json()) as {
-      preparedRows?: PreparedImportRow[];
-      mode?: "skip" | "update";
-    };
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  const parsedBody = await parseValidatedJson(
+    req,
+    ImportConfirmBodySchema,
+    MAX_IMPORT_JSON_BODY_BYTES,
+  );
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
 
-  const preparedRows = body.preparedRows ?? [];
-  const mode: "skip" | "update" = body.mode === "update" ? "update" : "skip";
-
-  if (!Array.isArray(preparedRows) || preparedRows.length === 0) {
-    return NextResponse.json(
-      { error: "No valid rows provided to import." },
-      { status: 400 },
-    );
-  }
-
-  if (preparedRows.length > MAX_IMPORT_ROWS) {
-    return NextResponse.json(
-      {
-        error: `Import exceeds maximum of ${MAX_IMPORT_ROWS.toLocaleString()} rows.`,
-      },
-      { status: 400 },
-    );
-  }
+  const preparedRows = parsedBody.data.preparedRows as PreparedImportRow[];
+  const mode = parsedBody.data.mode;
 
   // Verify event belongs to org.id
   const { data: event } = await supabase
@@ -174,7 +166,10 @@ export async function POST(
         ) {
           send({
             type: "error",
-            error: rpcError.message,
+            error: sanitizeClientErrorMessage(
+              rpcError,
+              "Import failed due to a validation or plan limit constraint.",
+            ),
           });
           controller.close();
           return;
@@ -297,7 +292,14 @@ export async function POST(
               .select("id, identifier");
 
             if (bErr) {
-              send({ type: "error", error: bErr.message });
+              console.error("[import:confirm] batch insert error:", bErr);
+              send({
+                type: "error",
+                error: sanitizeClientErrorMessage(
+                  bErr,
+                  "Failed to insert attendee batch.",
+                ),
+              });
               controller.close();
               return;
             }
@@ -370,10 +372,10 @@ export async function POST(
         });
         controller.close();
       } catch (err) {
+        console.error("[import:confirm] unexpected failure:", err);
         send({
           type: "error",
-          error:
-            err instanceof Error ? err.message : "Unexpected import failure.",
+          error: sanitizeClientErrorMessage(err, "Unexpected import failure."),
         });
         controller.close();
       }

@@ -7,6 +7,13 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import {
+  DeleteEventSchema,
+  EventDetailsInputSchema,
+  UpdateEventOverviewSchema,
+  UpdateEventSettingsSchema,
+} from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -132,7 +139,12 @@ export async function createEventAction(
     return { error: "You must be signed in to create an event." };
   }
 
-  const validated = validateCommonDetails(input);
+  const zodParsed = EventDetailsInputSchema.safeParse(input);
+  if (!zodParsed.success) {
+    return { error: formatZodError(zodParsed.error), code: "VALIDATION_ERROR" };
+  }
+
+  const validated = validateCommonDetails(zodParsed.data);
   if (validated.error || !validated.clean) {
     return { error: validated.error, code: "VALIDATION_ERROR" };
   }
@@ -185,7 +197,7 @@ export async function createEventAction(
       };
     }
     return {
-      error: insertErr?.message || "Failed to create event.",
+      error: sanitizeClientErrorMessage(insertErr, "Failed to create event."),
     };
   }
 
@@ -245,7 +257,12 @@ export async function updateEventOverviewAction(
     throw err;
   }
 
-  const validated = validateCommonDetails(input);
+  const ovParsed = UpdateEventOverviewSchema.safeParse(input);
+  if (!ovParsed.success) {
+    return { error: formatZodError(ovParsed.error), code: "VALIDATION_ERROR" };
+  }
+
+  const validated = validateCommonDetails(ovParsed.data);
   if (validated.error || !validated.clean) {
     return { error: validated.error, code: "VALIDATION_ERROR" };
   }
@@ -297,7 +314,7 @@ export async function updateEventOverviewAction(
         error: `The URL slug "${validated.clean.slug}" is already taken. Please choose a different slug.`,
       };
     }
-    return { error: updateErr?.message || "Failed to update event." };
+    return { error: sanitizeClientErrorMessage(updateErr, "Failed to update event.") };
   }
 
   try {
@@ -348,21 +365,15 @@ export async function updateEventSettingsAction(
     throw err;
   }
 
-  const identifierLabel = input.identifierLabel.trim();
-  if (identifierLabel.length < 1 || identifierLabel.length > 60) {
+  const settingsParsed = UpdateEventSettingsSchema.safeParse(input);
+  if (!settingsParsed.success) {
     return {
-      error: "Identifier label must be between 1 and 60 characters.",
+      error: formatZodError(settingsParsed.error),
       code: "VALIDATION_ERROR",
     };
   }
 
-  const allowedLimits = new Set<number | null>([1, 3, null]);
-  if (!allowedLimits.has(input.downloadLimit)) {
-    return {
-      error: "Download limit must be 1, 3, or Unlimited.",
-      code: "VALIDATION_ERROR",
-    };
-  }
+  const identifierLabel = settingsParsed.data.identifierLabel;
 
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
@@ -428,7 +439,9 @@ export async function updateEventSettingsAction(
   }
 
   if (updateErr || !updated) {
-    return { error: updateErr?.message || "Failed to save event settings." };
+    return {
+      error: sanitizeClientErrorMessage(updateErr, "Failed to save event settings."),
+    };
   }
 
   try {
@@ -485,13 +498,21 @@ export async function deleteEventAction(input: {
     throw err;
   }
 
+  const delParsed = DeleteEventSchema.safeParse(input);
+  if (!delParsed.success) {
+    return {
+      code: "VALIDATION_ERROR",
+      error: formatZodError(delParsed.error),
+    };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
   const { data: event } = await supabase
     .from("events")
     .select("id, title, slug")
-    .eq("id", input.eventId)
+    .eq("id", delParsed.data.eventId)
     .eq("org_id", org.id)
     .maybeSingle();
 
@@ -533,7 +554,7 @@ export async function deleteEventAction(input: {
     .eq("org_id", org.id);
 
   if (delErr) {
-    return { error: delErr.message || "Failed to delete event." };
+    return { error: sanitizeClientErrorMessage(delErr, "Failed to delete event.") };
   }
 
   // 3. Write audit_log entry.

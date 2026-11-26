@@ -1,6 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import {
+  ReviewPaymentActionSchema,
+  SuperAdminChangePlanSchema,
+  SuperAdminExtendExpirySchema,
+  SuperAdminSuspendSchema,
+} from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getCurrentSuperAdmin } from "@/lib/superadmin";
 import { computeExtendedExpiryIso } from "@/lib/superadmin-helpers";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -31,26 +38,36 @@ export async function setOrganizationSuspendedAction(input: {
     };
   }
 
+  const parsed = SuperAdminSuspendSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
   const admin = getSupabaseAdmin();
   const { data: orgRow } = await admin
     .from("organizations")
     .select("id, name, slug, status")
-    .eq("id", input.orgId)
+    .eq("id", parsed.data.orgId)
     .maybeSingle();
 
   if (!orgRow) {
     return { error: "Organization not found." };
   }
 
-  const targetStatus = input.suspended ? "suspended" : "active";
+  const targetStatus = parsed.data.suspended ? "suspended" : "active";
 
   const { error: updErr } = await admin
     .from("organizations")
     .update({ status: targetStatus })
-    .eq("id", input.orgId);
+    .eq("id", parsed.data.orgId);
 
   if (updErr) {
-    return { error: updErr.message || "Failed to update organization status." };
+    return {
+      error: sanitizeClientErrorMessage(
+        updErr,
+        "Failed to update organization status.",
+      ),
+    };
   }
 
   // If suspending, also revoke Supabase refresh sessions for non-superadmin members
@@ -122,7 +139,12 @@ export async function changeOrganizationPlanManuallyAction(input: {
     };
   }
 
-  const cleanPlanId = input.planId.trim().toLowerCase();
+  const parsed = SuperAdminChangePlanSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const cleanPlanId = parsed.data.planId;
   const admin = getSupabaseAdmin();
 
   const [orgRes, planRes] = await Promise.all([
@@ -167,7 +189,12 @@ export async function changeOrganizationPlanManuallyAction(input: {
     .eq("id", input.orgId);
 
   if (updErr) {
-    return { error: updErr.message || "Failed to change organization plan." };
+    return {
+      error: sanitizeClientErrorMessage(
+        updErr,
+        "Failed to change organization plan.",
+      ),
+    };
   }
 
   const { error: auditErr } = await admin.from("audit_log").insert({
@@ -211,11 +238,16 @@ export async function extendOrganizationExpiryAction(input: {
     };
   }
 
+  const parsed = SuperAdminExtendExpirySchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
   const admin = getSupabaseAdmin();
   const { data: orgRow } = await admin
     .from("organizations")
     .select("id, name, plan_id, plan_expires_at")
-    .eq("id", input.orgId)
+    .eq("id", parsed.data.orgId)
     .maybeSingle();
 
   if (!orgRow) {
@@ -245,7 +277,12 @@ export async function extendOrganizationExpiryAction(input: {
     .eq("id", input.orgId);
 
   if (updErr) {
-    return { error: updErr.message || "Failed to extend plan expiration." };
+    return {
+      error: sanitizeClientErrorMessage(
+        updErr,
+        "Failed to extend plan expiration.",
+      ),
+    };
   }
 
   const { error: auditErr } = await admin.from("audit_log").insert({
@@ -291,26 +328,29 @@ export async function superAdminReviewPaymentAction(input: {
     };
   }
 
-  if (input.decision !== "approved" && input.decision !== "rejected") {
-    return { error: "Decision must be approved or rejected." };
+  const parsed = ReviewPaymentActionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
   }
 
-  const billingDays = Math.min(
-    3660,
-    Math.max(1, Math.floor(input.billingDays ?? 30)),
-  );
+  const billingDays = parsed.data.billingDays ?? 30;
   const admin = getSupabaseAdmin();
 
   const { data: rpcRows, error } = await admin.rpc("review_payment_request", {
-    p_request_id: input.requestId,
-    p_decision: input.decision,
+    p_request_id: parsed.data.requestId,
+    p_decision: parsed.data.decision,
     p_reviewer: superAdmin.email,
-    p_note: input.reviewerNote?.trim() || null,
+    p_note: parsed.data.reviewerNote || null,
     p_billing_days: billingDays,
   });
 
   if (error) {
-    return { error: error.message };
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Failed to process payment review.",
+      ),
+    };
   }
 
   const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as

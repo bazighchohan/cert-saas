@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { ChangePasswordSchema, UpdateOrgNameSchema } from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -24,12 +26,11 @@ export async function updateOrganizationNameAction(input: {
     return { error: "You must be signed in to update settings." };
   }
 
-  const cleanName = input.name.trim();
-  if (cleanName.length < 2 || cleanName.length > 200) {
-    return {
-      error: "Organization name must be between 2 and 200 characters.",
-    };
+  const parsed = UpdateOrgNameSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
   }
+  const cleanName = parsed.data.name;
 
   if (cleanName === org.name) {
     return { success: true, orgName: cleanName };
@@ -45,7 +46,10 @@ export async function updateOrganizationNameAction(input: {
 
   if (error || !data) {
     return {
-      error: error?.message || "Could not update organization name.",
+      error: sanitizeClientErrorMessage(
+        error,
+        "Could not update organization name.",
+      ),
     };
   }
 
@@ -79,16 +83,23 @@ export async function changePasswordAction(input: {
     return { error: "You must be signed in to change your password." };
   }
 
-  const { newPassword } = input;
-  if (!newPassword || newPassword.length < 8) {
-    return { error: "New password must be at least 8 characters." };
+  const parsed = ChangePasswordSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
   }
 
   const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  const { error } = await supabase.auth.updateUser({
+    password: parsed.data.newPassword,
+  });
 
   if (error) {
-    return { error: error.message };
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Could not update password. Please choose a different password.",
+      ),
+    };
   }
 
   try {

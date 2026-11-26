@@ -7,6 +7,8 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import { UuidSchema } from "@/lib/schemas";
+import { checkCsrfOrigin, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -42,6 +44,17 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_TEMPLATE_BYTES + 256 * 1024) {
+    return NextResponse.json(
+      { error: "File exceeds the 5 MB maximum size limit.", code: "PAYLOAD_TOO_LARGE" },
+      { status: 413 },
+    );
+  }
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
@@ -63,7 +76,12 @@ export async function POST(
     throw err;
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
@@ -84,9 +102,10 @@ export async function POST(
     ? Math.floor(rawPageIndex)
     : 0;
 
-  if (!certTypeId) {
+  const certTypeParsed = UuidSchema.safeParse(certTypeId);
+  if (!certTypeParsed.success) {
     return NextResponse.json(
-      { error: "certTypeId is required." },
+      { error: "Valid certTypeId is required." },
       { status: 400 },
     );
   }
@@ -156,8 +175,9 @@ export async function POST(
     });
 
   if (uploadErr) {
+    console.error("[templates:upload] storage error:", uploadErr);
     return NextResponse.json(
-      { error: `Storage upload failed: ${uploadErr.message}` },
+      { error: "Storage upload failed. Please try again." },
       { status: 500 },
     );
   }
@@ -205,8 +225,14 @@ export async function POST(
       .eq("org_id", org.id);
 
     if (fallbackErr) {
+      console.error("[templates:upload] DB update error:", fallbackErr);
       return NextResponse.json(
-        { error: fallbackErr.message },
+        {
+          error: sanitizeClientErrorMessage(
+            fallbackErr,
+            "Failed to save uploaded template metadata.",
+          ),
+        },
         { status: 500 },
       );
     }

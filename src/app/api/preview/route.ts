@@ -53,8 +53,9 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (err) {
+    console.error("[dev-preview] render failed:", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err), code: "SERVER_ERROR" },
+      { error: "Failed to render preview PDF.", code: "SERVER_ERROR" },
       { status: 500 },
     );
   }

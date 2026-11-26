@@ -3,6 +3,7 @@ import "server-only";
 import { PDFDocument } from "pdf-lib";
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { UuidSchema } from "@/lib/schemas";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { detectMagicMime } from "@/lib/template-validator";
@@ -25,7 +26,12 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { certTypeId } = await context.params;
+  const { certTypeId: rawCertTypeId } = await context.params;
+  const parsedId = UuidSchema.safeParse(rawCertTypeId);
+  if (!parsedId.success) {
+    return NextResponse.json({ error: "Invalid certificate type ID." }, { status: 400 });
+  }
+  const certTypeId = parsedId.data;
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 

@@ -9,6 +9,17 @@ import {
   isPlanEnforcementError,
   type PlanErrorCode,
 } from "@/lib/plan-enforcement";
+import {
+  AddAttendeeInputSchema,
+  BulkDeleteAttendeesInputSchema,
+  BulkSetCertTypeInputSchema,
+  DeleteAttendeeInputSchema,
+  ResetAttendeeDownloadsInputSchema,
+  SaveAttendeeIssueNoteInputSchema,
+  SetAttendeeCertTypeInputSchema,
+  UpdateAttendeeInputSchema,
+} from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -117,10 +128,15 @@ export async function addAttendeeAction(input: {
     return { error: writeGuard.error, code: writeGuard.code };
   }
 
+  const addParsed = AddAttendeeInputSchema.safeParse(input);
+  if (!addParsed.success) {
+    return { error: formatZodError(addParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  const event = await loadScopedEvent(supabase, org.id, input.eventId);
+  const event = await loadScopedEvent(supabase, org.id, addParsed.data.eventId);
   if (!event) {
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
@@ -203,7 +219,7 @@ export async function addAttendeeAction(input: {
         error: `An attendee with ${event.identifierLabel} "${validated.clean.identifier}" already exists in this event.`,
       };
     }
-    return { error: insertErr?.message || "Failed to add attendee." };
+    return { error: sanitizeClientErrorMessage(insertErr, "Failed to add attendee.") };
   }
 
   const attendeeId = created.id as string;
@@ -228,7 +244,9 @@ export async function addAttendeeAction(input: {
         .delete()
         .eq("id", attendeeId)
         .eq("org_id", org.id);
-      return { error: `Failed to assign certificate(s): ${certErr.message}` };
+      return {
+        error: sanitizeClientErrorMessage(certErr, "Failed to assign certificate(s)."),
+      };
     }
   }
 
@@ -277,10 +295,15 @@ export async function updateAttendeeAction(input: {
     return { error: writeGuard.error, code: writeGuard.code };
   }
 
+  const updParsed = UpdateAttendeeInputSchema.safeParse(input);
+  if (!updParsed.success) {
+    return { error: formatZodError(updParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  const event = await loadScopedEvent(supabase, org.id, input.eventId);
+  const event = await loadScopedEvent(supabase, org.id, updParsed.data.eventId);
   if (!event) {
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
@@ -337,7 +360,7 @@ export async function updateAttendeeAction(input: {
         error: `Another attendee in this event already uses ${event.identifierLabel} "${validated.clean.identifier}".`,
       };
     }
-    return { error: updateErr?.message || "Attendee not found." };
+    return { error: sanitizeClientErrorMessage(updateErr, "Attendee not found.") };
   }
 
   try {
@@ -373,6 +396,11 @@ export async function deleteAttendeeAction(input: {
     return { error: "You must be signed in." };
   }
 
+  const delParsed = DeleteAttendeeInputSchema.safeParse(input);
+  if (!delParsed.success) {
+    return { error: formatZodError(delParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const writeGuard = await enforceWriteAccess(org.id);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
@@ -401,7 +429,7 @@ export async function deleteAttendeeAction(input: {
     .eq("org_id", org.id);
 
   if (delErr) {
-    return { error: delErr.message || "Failed to delete attendee." };
+    return { error: sanitizeClientErrorMessage(delErr, "Failed to delete attendee.") };
   }
 
   try {
@@ -442,10 +470,14 @@ export async function bulkDeleteAttendeesAction(input: {
     return { error: writeGuard.error, code: writeGuard.code };
   }
 
-  const uniqueIds = Array.from(new Set(input.attendeeIds)).filter(Boolean);
-  if (uniqueIds.length === 0) {
-    return { error: "No attendees selected.", code: "VALIDATION_ERROR" };
+  const bulkDelParsed = BulkDeleteAttendeesInputSchema.safeParse(input);
+  if (!bulkDelParsed.success) {
+    return {
+      error: formatZodError(bulkDelParsed.error),
+      code: "VALIDATION_ERROR",
+    };
   }
+  const uniqueIds = Array.from(new Set(bulkDelParsed.data.attendeeIds));
 
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
@@ -459,7 +491,9 @@ export async function bulkDeleteAttendeesAction(input: {
     .select("id");
 
   if (delErr) {
-    return { error: delErr.message || "Failed to delete selected attendees." };
+    return {
+      error: sanitizeClientErrorMessage(delErr, "Failed to delete selected attendees."),
+    };
   }
 
   const count = deletedRows?.length ?? 0;
@@ -496,6 +530,11 @@ export async function setAttendeeCertificateTypeAction(input: {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return { error: "You must be signed in." };
+  }
+
+  const setParsed = SetAttendeeCertTypeInputSchema.safeParse(input);
+  if (!setParsed.success) {
+    return { error: formatZodError(setParsed.error), code: "VALIDATION_ERROR" };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -551,7 +590,9 @@ export async function setAttendeeCertificateTypeAction(input: {
       });
 
     if (insErr && insErr.code !== "23505") {
-      return { error: insErr.message || "Failed to assign certificate type." };
+      return {
+        error: sanitizeClientErrorMessage(insErr, "Failed to assign certificate type."),
+      };
     }
 
     try {
@@ -593,7 +634,9 @@ export async function setAttendeeCertificateTypeAction(input: {
     .eq("event_id", input.eventId);
 
   if (delErr) {
-    return { error: delErr.message || "Failed to unassign certificate type." };
+    return {
+      error: sanitizeClientErrorMessage(delErr, "Failed to unassign certificate type."),
+    };
   }
 
   try {
@@ -633,10 +676,14 @@ export async function bulkSetCertificateTypeAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const uniqueIds = Array.from(new Set(input.attendeeIds)).filter(Boolean);
-  if (uniqueIds.length === 0) {
-    return { error: "No attendees selected.", code: "VALIDATION_ERROR" };
+  const bulkSetParsed = BulkSetCertTypeInputSchema.safeParse(input);
+  if (!bulkSetParsed.success) {
+    return {
+      error: formatZodError(bulkSetParsed.error),
+      code: "VALIDATION_ERROR",
+    };
   }
+  const uniqueIds = Array.from(new Set(bulkSetParsed.data.attendeeIds));
 
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
@@ -712,7 +759,10 @@ export async function bulkSetCertificateTypeAction(input: {
 
     if (insErr) {
       return {
-        error: insErr.message || "Failed to bulk-assign certificate type.",
+        error: sanitizeClientErrorMessage(
+          insErr,
+          "Failed to bulk-assign certificate type.",
+        ),
       };
     }
 
@@ -754,7 +804,10 @@ export async function bulkSetCertificateTypeAction(input: {
 
   if (delErr) {
     return {
-      error: delErr.message || "Failed to bulk-unassign certificate type.",
+      error: sanitizeClientErrorMessage(
+        delErr,
+        "Failed to bulk-unassign certificate type.",
+      ),
     };
   }
 
@@ -796,6 +849,11 @@ export async function resetAttendeeDownloadsAction(input: {
     return { error: "You must be signed in." };
   }
 
+  const resetParsed = ResetAttendeeDownloadsInputSchema.safeParse(input);
+  if (!resetParsed.success) {
+    return { error: formatZodError(resetParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const writeGuard = await enforceWriteAccess(org.id);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
@@ -833,7 +891,9 @@ export async function resetAttendeeDownloadsAction(input: {
 
   const { data: resetRows, error: resetErr } = await query.select("id");
   if (resetErr) {
-    return { error: resetErr.message || "Failed to reset download count." };
+    return {
+      error: sanitizeClientErrorMessage(resetErr, "Failed to reset download count."),
+    };
   }
 
   const resetCount = resetRows?.length ?? 0;
@@ -880,13 +940,14 @@ export async function saveAttendeeIssueNoteAction(input: {
     return { error: writeGuard.error, code: writeGuard.code };
   }
 
-  const cleanIssue = input.issueNote.trim();
-  if (cleanIssue.length > 1000) {
+  const issueParsed = SaveAttendeeIssueNoteInputSchema.safeParse(input);
+  if (!issueParsed.success) {
     return {
-      error: "Issue note cannot exceed 1,000 characters.",
+      error: formatZodError(issueParsed.error),
       code: "VALIDATION_ERROR",
     };
   }
+  const cleanIssue = issueParsed.data.issueNote.trim();
 
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
@@ -926,7 +987,9 @@ export async function saveAttendeeIssueNoteAction(input: {
   }
 
   if (updateErr) {
-    return { error: updateErr.message || "Failed to save issue note." };
+    return {
+      error: sanitizeClientErrorMessage(updateErr, "Failed to save issue note."),
+    };
   }
 
   try {

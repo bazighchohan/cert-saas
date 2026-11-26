@@ -2,6 +2,7 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { UuidSchema } from "@/lib/schemas";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { buildSampleImportCsv } from "@/lib/tabular-import";
 
@@ -17,7 +18,12 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const [eventRes, typesRes] = await Promise.all([

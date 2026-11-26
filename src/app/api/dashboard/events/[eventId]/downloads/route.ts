@@ -7,6 +7,7 @@ import {
   type DownloadStatusFilter,
 } from "@/lib/downloads-analytics";
 import { fetchEventDownloadsDataset } from "@/lib/downloads-data";
+import { DownloadsQuerySchema, UuidSchema } from "@/lib/schemas";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -27,7 +28,12 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const eventIdParsed = UuidSchema.safeParse(rawEventId);
+  if (!eventIdParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = eventIdParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const { data: event } = await supabase
@@ -42,18 +48,20 @@ export async function GET(
   }
 
   const sp = req.nextUrl.searchParams;
-  const statusRaw = sp.get("status") ?? "all";
-  const statusFilter: DownloadStatusFilter =
-    statusRaw === "downloaded" || statusRaw === "not_downloaded"
-      ? statusRaw
-      : "all";
-  const certTypeId = sp.get("certTypeId") ?? "";
-  const search = sp.get("search") ?? "";
-  const page = Math.max(1, Math.floor(Number(sp.get("page") ?? 1) || 1));
-  const pageSize = Math.min(
-    100,
-    Math.max(1, Math.floor(Number(sp.get("pageSize") ?? 50) || 50)),
-  );
+  const qParsed = DownloadsQuerySchema.safeParse({
+    status: sp.get("status") ?? "all",
+    certTypeId: sp.get("certTypeId") ?? "",
+    search: sp.get("search") ?? "",
+    page: sp.get("page") ?? 1,
+    pageSize: sp.get("pageSize") ?? 50,
+  });
+  if (!qParsed.success) {
+    return NextResponse.json(
+      { error: "Invalid download filter parameters." },
+      { status: 400 },
+    );
+  }
+  const { status: statusFilter, certTypeId, search, page, pageSize } = qParsed.data;
 
   try {
     const dataset = await fetchEventDownloadsDataset({

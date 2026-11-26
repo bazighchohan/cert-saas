@@ -9,6 +9,12 @@ import {
 } from "@/lib/certificates";
 import { fetchTemplateBytesFromStorage } from "@/lib/certificates/storage";
 import { resolveCuratedFont } from "@/lib/fonts";
+import { TestPdfBodySchema, UuidSchema } from "@/lib/schemas";
+import {
+  checkCsrfOrigin,
+  parseValidatedJson,
+  sanitizeClientErrorMessage,
+} from "@/lib/security";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -23,13 +29,24 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ certTypeId: string }> },
 ) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { certTypeId } = await context.params;
+  const { certTypeId: rawCertTypeId } = await context.params;
+  const parsedId = UuidSchema.safeParse(rawCertTypeId);
+  if (!parsedId.success) {
+    return NextResponse.json(
+      { error: "Invalid certificate type ID." },
+      { status: 400 },
+    );
+  }
+  const certTypeId = parsedId.data;
   const supabase = await createSupabaseServerClient();
 
   const { data: certType, error } = await supabase
@@ -53,12 +70,11 @@ export async function POST(
     .eq("org_id", org.id)
     .maybeSingle();
 
-  let body: Record<string, unknown> = {};
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    body = {};
+  const parsedBody = await parseValidatedJson(req, TestPdfBodySchema, 32 * 1024);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.data;
 
   const sampleName =
     typeof body.sampleName === "string" && body.sampleName.trim()
@@ -153,15 +169,20 @@ export async function POST(
       },
     });
   } catch (err) {
-    const status = err instanceof CertificateValidationError ? 400 : 500;
+    const isValidation = err instanceof CertificateValidationError;
+    if (!isValidation) {
+      console.error("[templates:test-pdf] render error:", err);
+    }
     return NextResponse.json(
       {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Failed to generate test certificate PDF.",
+        error: isValidation
+          ? err.message
+          : sanitizeClientErrorMessage(
+              err,
+              "Failed to generate test certificate PDF.",
+            ),
       },
-      { status },
+      { status: isValidation ? 400 : 500 },
     );
   }
 }

@@ -3,6 +3,7 @@ import "server-only";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { TEMPLATE_FILE } from "@/lib/config";
+import { assertOrgScopedStoragePath } from "@/lib/security-helpers";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 const MAX_STORAGE_CACHE_ENTRIES = 32;
@@ -34,11 +35,14 @@ export function fetchTemplateBytesFromStorage(params: {
     return samplePromise;
   }
 
-  const requiredPrefix = eventId ? `${orgId}/${eventId}/` : `${orgId}/`;
-  if (!templatePath.startsWith(requiredPrefix)) {
-    return Promise.reject(
-      new Error("Template path does not belong to the current organization."),
-    );
+  try {
+    assertOrgScopedStoragePath({
+      orgId,
+      eventId,
+      objectPath: templatePath,
+    });
+  } catch (err) {
+    return Promise.reject(err);
   }
 
   const cached = storageTemplateBytesCache.get(templatePath);

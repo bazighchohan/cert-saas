@@ -1,6 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { ReviewPaymentActionSchema } from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getCurrentSuperAdmin } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
@@ -27,26 +29,29 @@ export async function reviewPaymentRequestAction(input: {
     };
   }
 
-  if (input.decision !== "approved" && input.decision !== "rejected") {
-    return { error: "Decision must be approved or rejected." };
+  const parsed = ReviewPaymentActionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
   }
 
-  const billingDays = Math.min(
-    3660,
-    Math.max(1, Math.floor(input.billingDays ?? 30)),
-  );
+  const billingDays = parsed.data.billingDays ?? 30;
   const admin = getSupabaseAdmin();
 
   const { data: rpcRows, error } = await admin.rpc("review_payment_request", {
-    p_request_id: input.requestId,
-    p_decision: input.decision,
+    p_request_id: parsed.data.requestId,
+    p_decision: parsed.data.decision,
     p_reviewer: superAdmin.email,
-    p_note: input.reviewerNote?.trim() || null,
+    p_note: parsed.data.reviewerNote || null,
     p_billing_days: billingDays,
   });
 
   if (error) {
-    return { error: error.message };
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Failed to process payment request review.",
+      ),
+    };
   }
 
   const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as

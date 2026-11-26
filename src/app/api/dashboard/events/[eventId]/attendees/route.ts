@@ -2,6 +2,7 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { AttendeesQuerySchema, UuidSchema } from "@/lib/schemas";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -59,7 +60,15 @@ export async function GET(
     );
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const eventIdParsed = UuidSchema.safeParse(rawEventId);
+  if (!eventIdParsed.success) {
+    return NextResponse.json(
+      { error: "Invalid event ID." },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const eventId = eventIdParsed.data;
   const supabase = await createSupabaseServerClient();
 
   // Verify the event belongs to the current organization
@@ -78,30 +87,30 @@ export async function GET(
   }
 
   const sp = req.nextUrl.searchParams;
-  const page = Math.max(1, Math.floor(Number(sp.get("page") ?? 1) || 1));
-  const pageSize = Math.min(
-    100,
-    Math.max(1, Math.floor(Number(sp.get("pageSize") ?? 50) || 50)),
-  );
-  const rawSearch = (sp.get("search") ?? "").trim();
-  const sourceFilter = sp.get("source");
-  const sortByRaw = sp.get("sortBy") ?? "created_at";
-  const sortDirRaw = sp.get("sortDir") ?? "desc";
+  const queryParsed = AttendeesQuerySchema.safeParse({
+    page: sp.get("page") ?? 1,
+    pageSize: sp.get("pageSize") ?? 50,
+    search: sp.get("search") ?? "",
+    source: sp.get("source") ?? "",
+    sortBy: sp.get("sortBy") ?? "created_at",
+    sortDir: sp.get("sortDir") ?? "desc",
+  });
+  if (!queryParsed.success) {
+    return NextResponse.json(
+      { error: "Invalid query parameters.", code: "VALIDATION_ERROR" },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
-  const allowedSorts = new Set<AttendeeSortField>([
-    "created_at",
-    "identifier",
-    "full_name",
-    "email",
-    "source",
-    "downloads",
-  ]);
-  const sortBy: AttendeeSortField = allowedSorts.has(
-    sortByRaw as AttendeeSortField,
-  )
-    ? (sortByRaw as AttendeeSortField)
-    : "created_at";
-  const ascending = sortDirRaw === "asc";
+  const {
+    page,
+    pageSize,
+    search: rawSearch,
+    source: sourceFilter,
+    sortBy,
+    sortDir,
+  } = queryParsed.data;
+  const ascending = sortDir === "asc";
 
   // Fetch current certificate quota usage in parallel
   const quotaPromise = Promise.all([
@@ -182,8 +191,9 @@ export async function GET(
       ascending: false,
     });
     if (error) {
+      console.error("[attendees:GET] DB error:", error);
       return NextResponse.json(
-        { error: error.message },
+        { error: "Failed to load attendees." },
         { status: 500, headers: { "Cache-Control": "no-store" } },
       );
     }
@@ -208,8 +218,9 @@ export async function GET(
       .range(offset, offset + pageSize - 1);
 
     if (error) {
+      console.error("[attendees:GET] DB error:", error);
       return NextResponse.json(
-        { error: error.message },
+        { error: "Failed to load attendees." },
         { status: 500, headers: { "Cache-Control": "no-store" } },
       );
     }

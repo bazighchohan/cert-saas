@@ -9,6 +9,7 @@ import {
   type DownloadStatusFilter,
 } from "@/lib/downloads-analytics";
 import { fetchEventDownloadsDataset } from "@/lib/downloads-data";
+import { DownloadsExportQuerySchema, UuidSchema } from "@/lib/schemas";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -29,7 +30,12 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const eventIdParsed = UuidSchema.safeParse(rawEventId);
+  if (!eventIdParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = eventIdParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const { data: event } = await supabase
@@ -44,15 +50,18 @@ export async function GET(
   }
 
   const sp = req.nextUrl.searchParams;
-  const statusRaw = sp.get("status") ?? "downloaded";
-  const statusFilter: DownloadStatusFilter =
-    statusRaw === "downloaded" ||
-    statusRaw === "not_downloaded" ||
-    statusRaw === "all"
-      ? statusRaw
-      : "downloaded";
-  const format = sp.get("format") === "xlsx" ? "xlsx" : "csv";
-  const certTypeId = sp.get("certTypeId") ?? "";
+  const qParsed = DownloadsExportQuerySchema.safeParse({
+    status: sp.get("status") ?? "downloaded",
+    format: sp.get("format") ?? "csv",
+    certTypeId: sp.get("certTypeId") ?? "",
+  });
+  if (!qParsed.success) {
+    return NextResponse.json(
+      { error: "Invalid export parameters." },
+      { status: 400 },
+    );
+  }
+  const { status: statusFilter, format, certTypeId } = qParsed.data;
 
   try {
     const dataset = await fetchEventDownloadsDataset({

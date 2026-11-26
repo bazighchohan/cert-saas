@@ -10,6 +10,14 @@ import {
   provisionOrganizationForUser,
   resolveOrganizationName,
 } from "@/lib/auth";
+import { clientIpFromHeaders, enforceRateLimit } from "@/lib/rate-limit";
+import {
+  ForgotPasswordInputSchema,
+  LoginInputSchema,
+  ResetPasswordInputSchema,
+  SignupInputSchema,
+} from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -48,20 +56,22 @@ export async function signupAction(input: {
   email: string;
   password: string;
 }): Promise<AuthActionResult> {
-  const rawOrgName = input.orgName.trim();
-  const email = input.email.trim().toLowerCase();
-  const password = input.password;
+  const h = await headers();
+  const ip = clientIpFromHeaders(h);
 
-  if (rawOrgName.length < 2 || rawOrgName.length > 200) {
-    return { error: "Organization name must be between 2 and 200 characters." };
-  }
-  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    return { error: "Please enter a valid email address." };
-  }
-  if (!password || password.length < 8) {
-    return { error: "Password must be at least 8 characters." };
+  const ipRl = await enforceRateLimit(`auth:signup:ip:${ip}`, 5, 60_000);
+  if (!ipRl.ok) {
+    return {
+      error: `Too many sign-up attempts. Please wait ${ipRl.retryAfterSec}s and try again.`,
+    };
   }
 
+  const parsed = SignupInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const { orgName: rawOrgName, email, password } = parsed.data;
   const orgName = resolveOrganizationName({
     explicitName: rawOrgName,
     email,
@@ -70,8 +80,6 @@ export async function signupAction(input: {
   const origin = await getAppOrigin();
   const supabase = await createSupabaseServerClient();
 
-  // Pass organization_name in options.data (user_metadata) so it survives
-  // email confirmation links and future logins.
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
@@ -86,22 +94,24 @@ export async function signupAction(input: {
 
   if (error) {
     console.error("[auth:signupAction] Supabase signUp error:", error);
-    return { error: error.message };
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Could not create account. Please check your details and try again.",
+      ),
+    };
   }
 
   if (!data.user) {
     return { error: "Could not create user account. Please try again." };
   }
 
-  // Supabase returns an obfuscated user with empty identities if the email is already registered
-  // while email confirmations are enabled.
   if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
     return {
       error: "An account with this email already exists. Please sign in instead.",
     };
   }
 
-  // Provision the organization, owner membership, and Free plan atomically & idempotently.
   try {
     await provisionOrganizationForUser(
       data.user.id,
@@ -111,12 +121,10 @@ export async function signupAction(input: {
     );
   } catch (err) {
     console.error("[auth:signupAction] Organization provisioning failed:", err);
-    // If email confirmation is required, the user will auto-provision on callback/login;
-    // if immediate session was created, surface the error or let dashboard retry page handle it.
     if (data.session) {
-      const message =
-        err instanceof Error ? err.message : "Failed to create organization.";
-      return { error: message };
+      return {
+        error: "Account created, but organization setup failed. Please retry from the dashboard.",
+      };
     }
   }
 
@@ -136,11 +144,26 @@ export async function loginAction(input: {
   password: string;
   next?: string;
 }): Promise<AuthActionResult> {
-  const email = input.email.trim().toLowerCase();
-  const password = input.password;
+  const h = await headers();
+  const ip = clientIpFromHeaders(h);
 
-  if (!email || !password) {
-    return { error: "Please enter both email and password." };
+  const parsed = LoginInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const { email, password, next } = parsed.data;
+
+  const [ipRl, emailRl] = await Promise.all([
+    enforceRateLimit(`auth:login:ip:${ip}`, 10, 60_000),
+    enforceRateLimit(`auth:login:email:${email}`, 6, 60_000),
+  ]);
+
+  if (!ipRl.ok || !emailRl.ok) {
+    const wait = !ipRl.ok ? ipRl.retryAfterSec : !emailRl.ok ? emailRl.retryAfterSec : 60;
+    return {
+      error: `Too many sign-in attempts. Please wait ${wait}s before trying again.`,
+    };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -150,10 +173,9 @@ export async function loginAction(input: {
   });
 
   if (error) {
-    return { error: error.message };
+    return { error: "Invalid email or password." };
   }
 
-  // Ensure the user's organization exists and check if the organization is suspended.
   const [{ org }, isSuperAdmin] = await Promise.all([
     getCurrentOrgResult(),
     isUserInSuperAdminsTable(data.user?.id),
@@ -170,16 +192,12 @@ export async function loginAction(input: {
   return {
     success: true,
     redirectTo: safeNextPath(
-      input.next,
+      next,
       org?.status === "suspended" && isSuperAdmin ? "/superadmin" : "/dashboard",
     ),
   };
 }
 
-/**
- * Allows a logged-in user whose auto-provisioning failed to retry creating
- * their organization directly from the dashboard error view.
- */
 export async function retryProvisionOrganizationAction(input?: {
   orgName?: string;
 }): Promise<AuthActionResult> {
@@ -188,8 +206,11 @@ export async function retryProvisionOrganizationAction(input?: {
     return { error: "Your session has expired. Please sign in again." };
   }
 
+  const cleanExplicit =
+    typeof input?.orgName === "string" ? input.orgName.trim().slice(0, 200) : undefined;
+
   const resolvedName = resolveOrganizationName({
-    explicitName: input?.orgName,
+    explicitName: cleanExplicit,
     userMetadata: user.userMetadata,
     email: user.email,
   });
@@ -209,10 +230,7 @@ export async function retryProvisionOrganizationAction(input?: {
       err,
     );
     return {
-      error:
-        err instanceof Error
-          ? err.message
-          : "Could not set up your organization. Please try again.",
+      error: "Could not set up your organization right now. Please try again.",
     };
   }
 }
@@ -226,9 +244,24 @@ export async function logoutAction(): Promise<never> {
 export async function forgotPasswordAction(input: {
   email: string;
 }): Promise<AuthActionResult> {
-  const email = input.email.trim().toLowerCase();
-  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    return { error: "Please enter a valid email address." };
+  const h = await headers();
+  const ip = clientIpFromHeaders(h);
+
+  const parsed = ForgotPasswordInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const { email } = parsed.data;
+  const [ipRl, emailRl] = await Promise.all([
+    enforceRateLimit(`auth:forgot:ip:${ip}`, 5, 60_000),
+    enforceRateLimit(`auth:forgot:email:${email}`, 3, 60_000),
+  ]);
+
+  if (!ipRl.ok || !emailRl.ok) {
+    return {
+      error: "Too many password reset requests. Please wait a minute and try again.",
+    };
   }
 
   const origin = await getAppOrigin();
@@ -239,7 +272,11 @@ export async function forgotPasswordAction(input: {
   });
 
   if (error) {
-    return { error: error.message };
+    console.error("[auth:forgotPasswordAction] error:", error);
+    // Return generic success or safe message to prevent account enumeration & stack leaks
+    return {
+      error: "Could not send password reset email right now. Please try again shortly.",
+    };
   }
 
   return { success: true, email };
@@ -251,17 +288,32 @@ export async function resetPasswordAction(input: {
   tokenHash?: string;
   type?: string;
 }): Promise<AuthActionResult> {
-  const { password, code, tokenHash, type } = input;
-  if (!password || password.length < 8) {
-    return { error: "New password must be at least 8 characters." };
+  const h = await headers();
+  const ip = clientIpFromHeaders(h);
+
+  const ipRl = await enforceRateLimit(`auth:reset:ip:${ip}`, 6, 60_000);
+  if (!ipRl.ok) {
+    return {
+      error: "Too many password reset attempts. Please wait a minute and try again.",
+    };
   }
 
+  const parsed = ResetPasswordInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const { password, code, tokenHash, type } = parsed.data;
   const supabase = await createSupabaseServerClient();
 
   let user = await getCurrentUser();
   if (!user && code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) return { error: error.message };
+    if (error) {
+      return {
+        error: "Your password reset link is invalid or has expired.",
+      };
+    }
     user = await getCurrentUser();
   } else if (!user && tokenHash) {
     const otpType = (type as EmailOtpType) || "recovery";
@@ -269,7 +321,11 @@ export async function resetPasswordAction(input: {
       token_hash: tokenHash,
       type: otpType,
     });
-    if (error) return { error: error.message };
+    if (error) {
+      return {
+        error: "Your password reset link is invalid or has expired.",
+      };
+    }
     user = await getCurrentUser();
   }
 
@@ -282,7 +338,12 @@ export async function resetPasswordAction(input: {
 
   const { error } = await supabase.auth.updateUser({ password });
   if (error) {
-    return { error: error.message };
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Could not update password. Please choose a different password.",
+      ),
+    };
   }
 
   return { success: true, redirectTo: "/dashboard" };

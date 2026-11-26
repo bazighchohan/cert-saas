@@ -7,6 +7,14 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import {
+  AddCertificateTypeSchema,
+  DeleteCertificateTypeSchema,
+  RenameCertificateTypeSchema,
+  SaveNamePlacementSchema,
+  SelectTemplatePageSchema,
+} from "@/lib/schemas";
+import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { validateAndInspectTemplate } from "@/lib/template-validator";
@@ -48,13 +56,14 @@ export async function addCertificateTypeAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const cleanLabel = input.label.trim();
-  if (cleanLabel.length < 2 || cleanLabel.length > 80) {
+  const addParsed = AddCertificateTypeSchema.safeParse(input);
+  if (!addParsed.success) {
     return {
-      error: "Certificate type label must be between 2 and 80 characters.",
+      error: formatZodError(addParsed.error),
       code: "VALIDATION_ERROR",
     };
   }
+  const cleanLabel = addParsed.data.label;
 
   try {
     await assertWithinPlan(org.id, "write");
@@ -124,7 +133,7 @@ export async function addCertificateTypeAction(input: {
 
   if (insertErr || !created) {
     return {
-      error: insertErr?.message || "Failed to add certificate type.",
+      error: sanitizeClientErrorMessage(insertErr, "Failed to add certificate type."),
     };
   }
 
@@ -162,13 +171,14 @@ export async function renameCertificateTypeAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const cleanLabel = input.label.trim();
-  if (cleanLabel.length < 2 || cleanLabel.length > 80) {
+  const renParsed = RenameCertificateTypeSchema.safeParse(input);
+  if (!renParsed.success) {
     return {
-      error: "Certificate type label must be between 2 and 80 characters.",
+      error: formatZodError(renParsed.error),
       code: "VALIDATION_ERROR",
     };
   }
+  const cleanLabel = renParsed.data.label;
 
   try {
     await assertWithinPlan(org.id, "write");
@@ -190,7 +200,9 @@ export async function renameCertificateTypeAction(input: {
     .maybeSingle();
 
   if (error || !updated) {
-    return { error: error?.message || "Certificate type not found." };
+    return {
+      error: sanitizeClientErrorMessage(error, "Certificate type not found."),
+    };
   }
 
   try {
@@ -238,14 +250,19 @@ export async function selectTemplatePageAction(input: {
     throw err;
   }
 
+  const selParsed = SelectTemplatePageSchema.safeParse(input);
+  if (!selParsed.success) {
+    return { error: formatZodError(selParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
   const { data: certType } = await supabase
     .from("certificate_types")
     .select("id, template_path, template_mime")
-    .eq("id", input.certTypeId)
-    .eq("event_id", input.eventId)
+    .eq("id", selParsed.data.certTypeId)
+    .eq("event_id", selParsed.data.eventId)
     .eq("org_id", org.id)
     .maybeSingle();
 
@@ -263,7 +280,7 @@ export async function selectTemplatePageAction(input: {
     .download(path);
 
   if (dlErr || !blob) {
-    return { error: dlErr?.message || "Could not load template file from Storage." };
+    return { error: "Could not load template file from Storage." };
   }
 
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -290,7 +307,9 @@ export async function selectTemplatePageAction(input: {
     .eq("org_id", org.id);
 
   if (updateErr) {
-    return { error: updateErr.message };
+    return {
+      error: sanitizeClientErrorMessage(updateErr, "Failed to update selected page."),
+    };
   }
 
   try {
@@ -336,14 +355,19 @@ export async function deleteCertificateTypeAction(input: {
     throw err;
   }
 
+  const delParsed = DeleteCertificateTypeSchema.safeParse(input);
+  if (!delParsed.success) {
+    return { error: formatZodError(delParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
   const { data: certType } = await supabase
     .from("certificate_types")
     .select("id, key, label, template_path")
-    .eq("id", input.certTypeId)
-    .eq("event_id", input.eventId)
+    .eq("id", delParsed.data.certTypeId)
+    .eq("event_id", delParsed.data.eventId)
     .eq("org_id", org.id)
     .maybeSingle();
 
@@ -368,7 +392,9 @@ export async function deleteCertificateTypeAction(input: {
     .eq("org_id", org.id);
 
   if (delErr) {
-    return { error: delErr.message || "Failed to delete certificate type." };
+    return {
+      error: sanitizeClientErrorMessage(delErr, "Failed to delete certificate type."),
+    };
   }
 
   try {
@@ -426,47 +452,20 @@ export async function saveNamePlacementAction(
     throw err;
   }
 
-  const nameXPt = Number(Number(input.nameXPt).toFixed(2));
-  const nameYPt = Number(Number(input.nameYPt).toFixed(2));
-  const maxNameWidthPt = Number(Number(input.maxNameWidthPt).toFixed(2));
-  const nameSizePt = Number(Number(input.nameSizePt).toFixed(2));
-
-  if (
-    !Number.isFinite(nameXPt) ||
-    nameXPt < 0 ||
-    !Number.isFinite(nameYPt) ||
-    nameYPt < 0 ||
-    !Number.isFinite(maxNameWidthPt) ||
-    maxNameWidthPt < 10
-  ) {
+  const placeParsed = SaveNamePlacementSchema.safeParse(input);
+  if (!placeParsed.success) {
     return {
-      error: "Invalid name box coordinates or width.",
+      error: formatZodError(placeParsed.error),
       code: "VALIDATION_ERROR",
     };
   }
 
-  if (!Number.isFinite(nameSizePt) || nameSizePt < 4 || nameSizePt > 300) {
-    return {
-      error: "Font size must be between 4 and 300 points.",
-      code: "VALIDATION_ERROR",
-    };
-  }
+  const nameXPt = Number(Number(placeParsed.data.nameXPt).toFixed(2));
+  const nameYPt = Number(Number(placeParsed.data.nameYPt).toFixed(2));
+  const maxNameWidthPt = Number(Number(placeParsed.data.maxNameWidthPt).toFixed(2));
+  const nameSizePt = Number(Number(placeParsed.data.nameSizePt).toFixed(2));
 
-  if (!/^#[0-9A-Fa-f]{6}$/.test(input.nameColor)) {
-    return {
-      error: "Color must be a 6-digit hex code (e.g. #0B2A4F).",
-      code: "VALIDATION_ERROR",
-    };
-  }
-
-  if (!["left", "center", "right"].includes(input.nameAlign)) {
-    return {
-      error: "Alignment must be left, center, or right.",
-      code: "VALIDATION_ERROR",
-    };
-  }
-
-  const fontDef = resolveCuratedFont(input.nameFont);
+  const fontDef = resolveCuratedFont(placeParsed.data.nameFont);
 
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
@@ -500,7 +499,9 @@ export async function saveNamePlacementAction(
     .eq("org_id", org.id);
 
   if (updateErr) {
-    return { error: updateErr.message || "Failed to save name placement." };
+    return {
+      error: sanitizeClientErrorMessage(updateErr, "Failed to save name placement."),
+    };
   }
 
   try {

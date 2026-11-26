@@ -2,6 +2,7 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { UuidSchema } from "@/lib/schemas";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -30,7 +31,14 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { eventId, attendeeId } = await context.params;
+  const { eventId: rawEventId, attendeeId: rawAttendeeId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  const attParsed = UuidSchema.safeParse(rawAttendeeId);
+  if (!evParsed.success || !attParsed.success) {
+    return NextResponse.json({ error: "Invalid identifier." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
+  const attendeeId = attParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const { data: certs, error: certsErr } = await supabase
@@ -43,7 +51,11 @@ export async function GET(
     .eq("attendee_id", attendeeId);
 
   if (certsErr) {
-    return NextResponse.json({ error: certsErr.message }, { status: 500 });
+    console.error("[downloads:history] certs query error:", certsErr);
+    return NextResponse.json(
+      { error: "Failed to load attendee download history." },
+      { status: 500 },
+    );
   }
 
   if (!certs || certs.length === 0) {
@@ -72,7 +84,11 @@ export async function GET(
     .order("downloaded_at", { ascending: false });
 
   if (logsErr) {
-    return NextResponse.json({ error: logsErr.message }, { status: 500 });
+    console.error("[downloads:history] logs query error:", logsErr);
+    return NextResponse.json(
+      { error: "Failed to load attendee download log." },
+      { status: 500 },
+    );
   }
 
   const history: AttendeeDownloadHistoryItem[] = (logs ?? []).map((l) => {

@@ -9,7 +9,9 @@ import {
   hashClientIp,
   verifyPublicLookupToken,
 } from "@/lib/public-event";
-import { clientIp, rateLimit } from "@/lib/rate-limit";
+import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
+import { EventSlugParamSchema, PublicDownloadBodySchema } from "@/lib/schemas";
+import { parseValidatedJson } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -26,11 +28,19 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ slug: string }> },
 ) {
-  const { slug } = await context.params;
+  const { slug: rawSlug } = await context.params;
+  const slugParsed = EventSlugParamSchema.safeParse(rawSlug);
+  if (!slugParsed.success) {
+    return NextResponse.json(
+      { error: "Event not found.", code: "EVENT_NOT_FOUND" },
+      { status: 404, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const slug = slugParsed.data;
   const ip = clientIp(req);
 
-  // 1. Rate limit by IP
-  const ipRl = rateLimit(`pub:dl:ip:${ip}`, 10, 60_000);
+  // 1. Distributed rate limit by IP
+  const ipRl = await enforceRateLimit(`pub:dl:ip:${ip}`, 10, 60_000);
   if (!ipRl.ok) {
     return NextResponse.json(
       {
@@ -47,31 +57,14 @@ export async function POST(
     );
   }
 
-  let body: { token?: unknown; attendeeCertificateId?: unknown };
-  try {
-    body = (await req.json()) as {
-      token?: unknown;
-      attendeeCertificateId?: unknown;
-    };
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid download request.", code: "BAD_REQUEST" },
-      { status: 400, headers: { "Cache-Control": "no-store" } },
-    );
+  const parsedBody = await parseValidatedJson(req, PublicDownloadBodySchema, 16 * 1024);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
 
-  const token = typeof body.token === "string" ? body.token : null;
-  const attendeeCertificateId =
-    typeof body.attendeeCertificateId === "string"
-      ? body.attendeeCertificateId.trim()
-      : "";
-
+  const { token, attendeeCertificateId } = parsedBody.data;
   const payload = verifyPublicLookupToken(token);
-  if (
-    !payload ||
-    !attendeeCertificateId ||
-    payload.slug !== slug.toLowerCase()
-  ) {
+  if (!payload || payload.slug !== slug) {
     return NextResponse.json(
       {
         error: "Your lookup session expired. Please enter your details again.",
@@ -81,8 +74,8 @@ export async function POST(
     );
   }
 
-  // 2. Rate limit by identifier
-  const idRl = rateLimit(
+  // 2. Distributed rate limit by identifier
+  const idRl = await enforceRateLimit(
     `pub:dl:id:${payload.slug}:${payload.identifierLower}`,
     6,
     60_000,

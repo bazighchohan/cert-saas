@@ -81,8 +81,9 @@ export async function GET(req: NextRequest) {
     .select("id");
 
   if (fallbackErr) {
+    console.error("[cron:check-expiring-plans] error:", error ?? fallbackErr);
     return NextResponse.json(
-      { error: error?.message || fallbackErr.message },
+      { error: "Failed to process expiring organizations check." },
       { status: 500 },
     );
   }

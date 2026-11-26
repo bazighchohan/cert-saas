@@ -6,10 +6,16 @@ import {
   assertWithinPlan,
   isPlanEnforcementError,
 } from "@/lib/plan-enforcement";
+import { ImportPreviewBodySchema, UuidSchema } from "@/lib/schemas";
+import {
+  checkCsrfOrigin,
+  MAX_IMPORT_JSON_BODY_BYTES,
+  parseValidatedJson,
+  sanitizeClientErrorMessage,
+} from "@/lib/security";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
   buildErrorReportCsv,
-  MAX_IMPORT_ROWS,
   validateMappedImportRows,
   type ColumnMappingConfig,
   type ExistingAttendeeSnapshot,
@@ -26,6 +32,9 @@ export async function POST(
   req: NextRequest,
   context: { params: Promise<{ eventId: string }> },
 ) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
@@ -44,40 +53,25 @@ export async function POST(
     throw err;
   }
 
-  const { eventId } = await context.params;
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
 
-  let body: {
-    rows?: Array<{ rowNumber: number; cells: string[] }>;
-    mapping?: ColumnMappingConfig;
-  };
-  try {
-    body = (await req.json()) as {
-      rows?: Array<{ rowNumber: number; cells: string[] }>;
-      mapping?: ColumnMappingConfig;
-    };
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  const parsedBody = await parseValidatedJson(
+    req,
+    ImportPreviewBodySchema,
+    MAX_IMPORT_JSON_BODY_BYTES,
+  );
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
 
-  const rows = body.rows ?? [];
-  const mapping = body.mapping;
-
-  if (!Array.isArray(rows) || rows.length === 0 || !mapping) {
-    return NextResponse.json(
-      { error: "Rows and column mapping are required." },
-      { status: 400 },
-    );
-  }
-
-  if (rows.length > MAX_IMPORT_ROWS) {
-    return NextResponse.json(
-      {
-        error: `Import exceeds maximum of ${MAX_IMPORT_ROWS.toLocaleString()} rows.`,
-      },
-      { status: 400 },
-    );
-  }
+  const rows = parsedBody.data.rows;
+  const mapping = parsedBody.data.mapping as ColumnMappingConfig;
 
   const [eventRes, typesRes, planRes, eventCertsRes, orgCertsRes] =
     await Promise.all([
@@ -130,7 +124,11 @@ export async function POST(
       .range(pageOffset, pageOffset + FETCH_CHUNK - 1);
 
     if (attErr) {
-      return NextResponse.json({ error: attErr.message }, { status: 500 });
+      console.error("[import:preview] attendees query error:", attErr);
+      return NextResponse.json(
+        { error: "Failed to load existing attendees for validation." },
+        { status: 500 },
+      );
     }
     if (!attBatch || attBatch.length === 0) break;
 
@@ -192,10 +190,10 @@ export async function POST(
   } catch (err) {
     return NextResponse.json(
       {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Validation failed for mapped columns.",
+        error: sanitizeClientErrorMessage(
+          err,
+          "Validation failed for mapped columns.",
+        ),
       },
       { status: 400 },
     );

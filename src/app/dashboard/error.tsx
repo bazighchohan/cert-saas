@@ -18,8 +18,13 @@ export default function DashboardErrorPage({
         Something went wrong loading the dashboard
       </h2>
       <p className="mt-1.5 text-xs text-slate-600">
-        {error.message || "An unexpected error occurred."}
+        We couldn&apos;t complete this request right now. Please try again.
       </p>
+      {error.digest && (
+        <p className="mt-1 font-mono text-[10px] text-slate-400">
+          Ref: {error.digest}
+        </p>
+      )}
       <div className="mt-5 flex items-center justify-center gap-3">
         <Button variant="primary" size="sm" onClick={() => reset()}>
           Retry

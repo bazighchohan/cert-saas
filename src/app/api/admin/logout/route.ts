@@ -1,11 +1,15 @@
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
+import { checkCsrfOrigin } from "@/lib/security";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
   try {
     const supabase = await createSupabaseServerClient();
     await supabase.auth.signOut();

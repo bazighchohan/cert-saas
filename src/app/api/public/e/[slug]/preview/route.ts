@@ -7,7 +7,8 @@ import {
   getPublicEventBySlug,
   verifyPublicLookupToken,
 } from "@/lib/public-event";
-import { clientIp, rateLimit } from "@/lib/rate-limit";
+import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
+import { EventSlugParamSchema, PublicPreviewQuerySchema } from "@/lib/schemas";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -23,10 +24,15 @@ export async function GET(
   req: NextRequest,
   context: { params: Promise<{ slug: string }> },
 ) {
-  const { slug } = await context.params;
+  const { slug: rawSlug } = await context.params;
+  const slugParsed = EventSlugParamSchema.safeParse(rawSlug);
+  if (!slugParsed.success) {
+    return NextResponse.json({ error: "Event not found." }, { status: 404 });
+  }
+  const slug = slugParsed.data;
   const ip = clientIp(req);
 
-  const ipRl = rateLimit(`pub:preview:ip:${ip}`, 24, 60_000);
+  const ipRl = await enforceRateLimit(`pub:preview:ip:${ip}`, 24, 60_000);
   if (!ipRl.ok) {
     return NextResponse.json(
       { error: "Too many requests. Please wait a moment." },
@@ -34,18 +40,27 @@ export async function GET(
     );
   }
 
-  const token = req.nextUrl.searchParams.get("token");
-  const certId = req.nextUrl.searchParams.get("certId");
+  const queryParsed = PublicPreviewQuerySchema.safeParse({
+    token: req.nextUrl.searchParams.get("token") ?? "",
+    certId: req.nextUrl.searchParams.get("certId") ?? "",
+  });
+  if (!queryParsed.success) {
+    return NextResponse.json(
+      { error: "Invalid preview parameters." },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
+  const { token, certId } = queryParsed.data;
   const payload = verifyPublicLookupToken(token);
-  if (!payload || !certId || payload.slug !== slug.toLowerCase()) {
+  if (!payload || payload.slug !== slug) {
     return NextResponse.json(
       { error: "Preview session expired. Please look up your certificate again." },
       { status: 401, headers: { "Cache-Control": "no-store" } },
     );
   }
 
-  const idRl = rateLimit(
+  const idRl = await enforceRateLimit(
     `pub:preview:id:${payload.slug}:${payload.identifierLower}`,
     16,
     60_000,

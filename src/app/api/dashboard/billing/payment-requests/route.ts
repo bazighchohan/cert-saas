@@ -8,11 +8,11 @@ import {
   MAX_PAYMENT_PROOF_BYTES,
   validatePaymentProofBytes,
 } from "@/lib/plan-enforcement-helpers";
+import { PaymentUpgradeFieldsSchema } from "@/lib/schemas";
+import { checkCsrfOrigin, formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
-
-const ALLOWED_METHODS = new Set(["bank", "jazzcash", "easypaisa"]);
 
 async function ensurePaymentProofsBucket() {
   const admin = getSupabaseAdmin();
@@ -40,6 +40,17 @@ async function ensurePaymentProofsBucket() {
  * since submitting an upgrade/renewal request is how an expired org renews!
  */
 export async function POST(req: NextRequest) {
+  const csrf = checkCsrfOrigin(req);
+  if (csrf) return csrf;
+
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_PAYMENT_PROOF_BYTES + 256 * 1024) {
+    return NextResponse.json(
+      { error: "Upload exceeds the 5 MB maximum size limit.", code: "PAYLOAD_TOO_LARGE" },
+      { status: 413 },
+    );
+  }
+
   const user = await getCurrentUser();
   const org = await getCurrentOrg();
   if (!user || !org) {
@@ -66,41 +77,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const planId = String(formData.get("planId") ?? "").trim().toLowerCase();
-  const paymentMethod = String(formData.get("paymentMethod") ?? "")
-    .trim()
-    .toLowerCase();
-  const transactionReference = String(
-    formData.get("transactionReference") ?? "",
-  ).trim();
+  const fieldsParsed = PaymentUpgradeFieldsSchema.safeParse({
+    planId: String(formData.get("planId") ?? ""),
+    paymentMethod: String(formData.get("paymentMethod") ?? "")
+      .trim()
+      .toLowerCase(),
+    transactionReference: String(formData.get("transactionReference") ?? ""),
+  });
+  if (!fieldsParsed.success) {
+    return NextResponse.json(
+      { error: formatZodError(fieldsParsed.error), code: "VALIDATION_ERROR" },
+      { status: 400 },
+    );
+  }
+
+  const { planId, paymentMethod, transactionReference } = fieldsParsed.data;
   const screenshot = formData.get("screenshot");
-
-  if (!planId) {
-    return NextResponse.json(
-      { error: "Please select a plan to upgrade to." },
-      { status: 400 },
-    );
-  }
-
-  if (!ALLOWED_METHODS.has(paymentMethod)) {
-    return NextResponse.json(
-      {
-        error:
-          "Payment method must be Bank Transfer, JazzCash, or Easypaisa.",
-      },
-      { status: 400 },
-    );
-  }
-
-  if (transactionReference.length < 2 || transactionReference.length > 120) {
-    return NextResponse.json(
-      {
-        error:
-          "Transaction reference / TID must be between 2 and 120 characters.",
-      },
-      { status: 400 },
-    );
-  }
 
   if (!(screenshot instanceof File) || screenshot.size === 0) {
     return NextResponse.json(
@@ -153,8 +145,9 @@ export async function POST(req: NextRequest) {
     });
 
   if (uploadErr) {
+    console.error("[billing:upload] storage error:", uploadErr);
     return NextResponse.json(
-      { error: `Failed to upload payment screenshot: ${uploadErr.message}` },
+      { error: "Failed to upload payment receipt screenshot. Please try again." },
       { status: 500 },
     );
   }
@@ -182,11 +175,13 @@ export async function POST(req: NextRequest) {
     } catch {
       // Ignore cleanup errors
     }
+    console.error("[billing:insert] DB error:", insertErr);
     return NextResponse.json(
       {
-        error:
-          insertErr?.message ||
-          "Failed to record payment request. Ensure migration 011_billing_and_plan_enforcement.sql has been applied.",
+        error: sanitizeClientErrorMessage(
+          insertErr,
+          "Failed to record payment request. Please try again.",
+        ),
       },
       { status: 500 },
     );

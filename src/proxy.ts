@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { verifySameOriginRequest } from "@/lib/security-helpers";
 
 /**
  * Next.js 16 Proxy:
@@ -12,6 +13,33 @@ export async function proxy(req: NextRequest) {
 
   if (pathname === "/admin/login") {
     return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  // Enforce CSRF same-origin verification on all cookie-authenticated API mutations
+  const isCookieAuthenticatedApi =
+    pathname.startsWith("/api/dashboard/") ||
+    pathname.startsWith("/api/superadmin/") ||
+    pathname === "/api/admin" ||
+    pathname.startsWith("/api/admin/");
+
+  if (isCookieAuthenticatedApi) {
+    const csrf = verifySameOriginRequest({
+      method: req.method,
+      originHeader: req.headers.get("origin"),
+      refererHeader: req.headers.get("referer"),
+      hostHeader: req.headers.get("host"),
+      forwardedHostHeader: req.headers.get("x-forwarded-host"),
+      secFetchSiteHeader: req.headers.get("sec-fetch-site"),
+    });
+    if (!csrf.ok) {
+      return NextResponse.json(
+        {
+          error: "Cross-origin request blocked by CSRF protection.",
+          code: "CSRF_BLOCKED",
+        },
+        { status: 403, headers: { "Cache-Control": "no-store" } },
+      );
+    }
   }
 
   let res = NextResponse.next({
