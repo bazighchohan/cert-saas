@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Input, useToast } from "@/components/ui";
 import type { OrgUsageSummary } from "@/lib/dashboard-data";
+import { formatExpiryCountdown } from "@/lib/pricing";
 import {
   changePasswordAction,
   updateOrganizationNameAction,
@@ -14,16 +16,21 @@ export default function SettingsClient({
 }: {
   summary: OrgUsageSummary;
 }) {
-  const { org, user, plan, eventsUsed, certificatesUsed } = summary;
+  const {
+    org,
+    user,
+    eventsSlotsUsed,
+    eventsSlotsTotal,
+    soonestActiveExpiry,
+    certificatesUsed,
+  } = summary;
   const { showToast } = useToast();
   const router = useRouter();
 
-  // Organization name state
   const [orgName, setOrgName] = useState(org.name);
   const [savingOrg, setSavingOrg] = useState(false);
   const [orgError, setOrgError] = useState<string | null>(null);
 
-  // Password change state
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [savingPassword, setSavingPassword] = useState(false);
@@ -95,17 +102,11 @@ export default function SettingsClient({
   }
 
   const eventsRatio =
-    plan.maxEvents && plan.maxEvents > 0
-      ? Math.min(100, Math.round((eventsUsed / plan.maxEvents) * 100))
+    eventsSlotsTotal > 0
+      ? Math.min(100, Math.round((eventsSlotsUsed / eventsSlotsTotal) * 100))
       : 0;
 
-  const certsRatio =
-    plan.maxCertificatesTotal && plan.maxCertificatesTotal > 0
-      ? Math.min(
-          100,
-          Math.round((certificatesUsed / plan.maxCertificatesTotal) * 100),
-        )
-      : 0;
+  const expiry = formatExpiryCountdown(soonestActiveExpiry);
 
   return (
     <div className="space-y-8">
@@ -114,7 +115,7 @@ export default function SettingsClient({
           Settings
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          Manage your organization profile, view current plan limits, and update your password.
+          Manage your organization profile, view active package slots, and update your password.
         </p>
       </div>
 
@@ -168,87 +169,65 @@ export default function SettingsClient({
         </form>
       </section>
 
-      {/* 2. Current Plan & Usage */}
+      {/* 2. Active Package Slots & Usage */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 pb-5">
           <div>
             <div className="flex items-center gap-2.5">
               <h2 className="text-base font-bold text-slate-900">
-                Current Plan & Usage
+                Packages &amp; Usage
               </h2>
               <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-indigo-700 ring-1 ring-indigo-200">
-                {plan.name}
+                {org.packageLabel}
               </span>
             </div>
             <p className="mt-0.5 text-xs text-slate-500">
-              {plan.pricePkr === 0
-                ? "Free tier — ideal for trying out cert-saas on a small seminar or workshop."
-                : `PKR ${plan.pricePkr.toLocaleString()} / month`}
+              {soonestActiveExpiry
+                ? `Soonest active package ${expiry.label}.`
+                : "Buy a package in Billing to create and release events."}
             </p>
           </div>
 
-          <div className="text-right text-xs text-slate-500">
-            <div>
-              Max per event:{" "}
-              <strong className="text-slate-900">
-                {plan.maxCertificatesPerEvent ?? "Unlimited"} certificates
-              </strong>
-            </div>
-            <div>
-              Custom branding:{" "}
-              <strong className="text-slate-900">
-                {plan.allowCustomBranding ? "Included" : "Not included"}
-              </strong>
-            </div>
-          </div>
+          <Link
+            href="/dashboard/billing"
+            className="rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+          >
+            Manage Packages &amp; Top-Ups →
+          </Link>
         </div>
 
         <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
-          {/* Events usage card */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
             <div className="flex items-baseline justify-between">
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Events Used
+                Active Event Slots
               </span>
               <span className="text-base font-bold text-slate-900">
-                {eventsUsed} / {plan.maxEvents ?? "∞"}
+                {eventsSlotsUsed} / {eventsSlotsTotal} events
               </span>
             </div>
-            {plan.maxEvents !== null && (
-              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full rounded-full bg-indigo-600 transition-all"
-                  style={{ width: `${eventsRatio}%` }}
-                />
-              </div>
-            )}
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full rounded-full bg-indigo-600 transition-all"
+                style={{ width: `${eventsRatio}%` }}
+              />
+            </div>
             <p className="mt-2 text-xs text-slate-500">
-              {plan.maxEvents !== null
-                ? `${Math.max(0, plan.maxEvents - eventsUsed)} event slot(s) remaining on ${plan.name}.`
-                : "Unlimited events on your plan."}
+              {Math.max(0, eventsSlotsTotal - eventsSlotsUsed)} event slot(s) remaining across active packages.
             </p>
           </div>
 
-          {/* Certificates usage card */}
           <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
             <div className="flex items-baseline justify-between">
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Total Certificates Issued
+                Certificates Issued Across Events
               </span>
               <span className="text-base font-bold text-slate-900">
-                {certificatesUsed} / {plan.maxCertificatesTotal ?? "∞"}
+                {certificatesUsed.toLocaleString()}
               </span>
             </div>
-            {plan.maxCertificatesTotal !== null && (
-              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full rounded-full bg-indigo-600 transition-all"
-                  style={{ width: `${certsRatio}%` }}
-                />
-              </div>
-            )}
-            <p className="mt-2 text-xs text-slate-500">
-              Up to {plan.maxCertificatesPerEvent ?? "unlimited"} certificates per event.
+            <p className="mt-3 text-xs text-slate-500">
+              Each event enforces its own certificate cap copied from its package (plus any approved top-ups).
             </p>
           </div>
         </div>

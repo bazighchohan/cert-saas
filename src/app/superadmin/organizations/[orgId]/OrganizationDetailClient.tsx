@@ -7,10 +7,11 @@ import { Button, Input, useToast } from "@/components/ui";
 import { isPlanExpired } from "@/lib/plan-enforcement-helpers";
 import type { SuperAdminOrgDetailData } from "@/lib/superadmin-data";
 import {
-  changeOrganizationPlanManuallyAction,
   extendOrganizationExpiryAction,
   setOrganizationSuspendedAction,
-  superAdminReviewPaymentAction,
+  superAdminGrantPackageAction,
+  superAdminReviewPurchaseAction,
+  superAdminReviewTopupAction,
 } from "../../actions";
 
 function formatDateTime(iso: string | null): string {
@@ -36,12 +37,12 @@ export default function OrganizationDetailClient({
 
   const {
     org,
-    currentPlan,
-    allPlans,
+    presets,
     usage,
     members,
     events,
-    paymentRequests,
+    purchases,
+    topups,
     auditLogs,
   } = data;
 
@@ -49,22 +50,20 @@ export default function OrganizationDetailClient({
   const [suspendReason, setSuspendReason] = useState("");
   const [togglingSuspend, setTogglingSuspend] = useState(false);
 
-  // Manual Plan Change state
-  const [selectedPlanId, setSelectedPlanId] = useState(org.planId);
-  const [planDurationDays, setPlanDurationDays] = useState("30");
-  const [planReason, setPlanReason] = useState("");
-  const [savingPlan, setSavingPlan] = useState(false);
+  // Grant Package Manually / Pilot state
+  const [selectedPresetId, setSelectedPresetId] = useState(
+    presets[0]?.id ?? "",
+  );
+  const [grantIsPilot, setGrantIsPilot] = useState(true);
+  const [grantNote, setGrantNote] = useState("");
+  const [grantingPackage, setGrantingPackage] = useState(false);
 
   // Extend Expiry state
   const [exactExpiryDate, setExactExpiryDate] = useState("");
   const [expiryReason, setExpiryReason] = useState("");
   const [savingExpiry, setSavingExpiry] = useState(false);
 
-  // Payment review state
-  const [reviewingPaymentId, setReviewingPaymentId] = useState<string | null>(
-    null,
-  );
-
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
   const expired = isPlanExpired(org.planExpiresAt);
 
   async function handleToggleSuspend() {
@@ -95,31 +94,36 @@ export default function OrganizationDetailClient({
     }
   }
 
-  async function handleManualPlanSubmit(e: FormEvent) {
+  async function handleGrantPackageSubmit(e: FormEvent) {
     e.preventDefault();
-    setSavingPlan(true);
+    const preset = presets.find((p) => p.id === selectedPresetId) ?? presets[0];
+    if (!preset) return;
+
+    setGrantingPackage(true);
     try {
-      const days =
-        selectedPlanId === "free"
-          ? null
-          : Math.max(1, Number(planDurationDays) || 30);
-      const res = await changeOrganizationPlanManuallyAction({
+      const res = await superAdminGrantPackageAction({
         orgId: org.id,
-        planId: selectedPlanId,
-        durationDays: days,
-        reason: planReason,
+        planId: preset.id,
+        eventsTotal: preset.eventsCount,
+        certsPerEvent: preset.certsPerEvent,
+        months: preset.months as 3 | 6 | 12,
+        isPilot: grantIsPilot,
+        note: grantNote,
       });
       if (res.error) {
         showToast(res.error, "error");
         return;
       }
-      showToast(`Updated plan to "${selectedPlanId}" and logged to audit_log.`, "success");
-      setPlanReason("");
+      showToast(
+        `Granted ${grantIsPilot ? "Pilot" : "Manual"} ${preset.name} package to ${org.name}.`,
+        "success",
+      );
+      setGrantNote("");
       router.refresh();
     } catch {
-      showToast("Failed to change plan.", "error");
+      showToast("Failed to grant package.", "error");
     } finally {
-      setSavingPlan(false);
+      setGrantingPackage(false);
     }
   }
 
@@ -135,7 +139,7 @@ export default function OrganizationDetailClient({
         showToast(res.error, "error");
         return;
       }
-      showToast(`Extended plan expiration by +${addDays} days.`, "success");
+      showToast(`Extended package expiration by +${addDays} days.`, "success");
       router.refresh();
     } catch {
       showToast("Failed to extend expiration.", "error");
@@ -167,32 +171,45 @@ export default function OrganizationDetailClient({
     }
   }
 
-  async function handleDecision(
-    requestId: string,
+  async function handlePurchaseDecision(
+    purchaseId: string,
     decision: "approved" | "rejected",
   ) {
-    setReviewingPaymentId(requestId);
+    setReviewingId(purchaseId);
     try {
-      const res = await superAdminReviewPaymentAction({
-        requestId,
+      const res = await superAdminReviewPurchaseAction({
+        purchaseId,
         decision,
-        billingDays: 30,
       });
       if (res.error) {
         showToast(res.error, "error");
         return;
       }
-      showToast(
-        decision === "approved"
-          ? "Payment request approved — plan upgraded."
-          : "Payment request rejected.",
-        "success",
-      );
+      showToast(`Purchase ${decision}.`, "success");
       router.refresh();
-    } catch {
-      showToast("Failed to review payment request.", "error");
     } finally {
-      setReviewingPaymentId(null);
+      setReviewingId(null);
+    }
+  }
+
+  async function handleTopupDecision(
+    topupId: string,
+    decision: "approved" | "rejected",
+  ) {
+    setReviewingId(topupId);
+    try {
+      const res = await superAdminReviewTopupAction({
+        topupId,
+        decision,
+      });
+      if (res.error) {
+        showToast(res.error, "error");
+        return;
+      }
+      showToast(`Top-up ${decision}.`, "success");
+      router.refresh();
+    } finally {
+      setReviewingId(null);
     }
   }
 
@@ -220,7 +237,7 @@ export default function OrganizationDetailClient({
               </span>
             )}
             <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-semibold uppercase text-indigo-700 ring-1 ring-indigo-200">
-              {currentPlan.name} Plan
+              {org.packageLabel}
             </span>
           </div>
           <p className="mt-1 font-mono text-[11px] text-slate-500">
@@ -233,10 +250,13 @@ export default function OrganizationDetailClient({
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Events
+            Active Slots / Total Events
           </p>
           <p className="mt-2 text-2xl font-bold text-slate-900">
-            {usage.eventsCount} / {currentPlan.maxEvents ?? "∞"}
+            {usage.eventsSlotsUsed} / {usage.eventsSlotsTotal}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {usage.eventsCount} total events created
           </p>
         </div>
 
@@ -254,16 +274,13 @@ export default function OrganizationDetailClient({
             Certificates Issued
           </p>
           <p className="mt-2 text-2xl font-bold text-slate-900">
-            {usage.certificatesIssuedCount.toLocaleString()} /{" "}
-            {currentPlan.maxCertificatesTotal !== null
-              ? currentPlan.maxCertificatesTotal.toLocaleString()
-              : "∞"}
+            {usage.certificatesIssuedCount.toLocaleString()}
           </p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Plan Expiry
+            Package Expiry
           </p>
           <p
             className={`mt-2 text-base font-bold ${
@@ -276,7 +293,7 @@ export default function OrganizationDetailClient({
                   day: "numeric",
                   year: "numeric",
                 })
-              : "No expiration"}
+              : "No active package"}
           </p>
           <p className="mt-1 text-xs text-slate-500">
             {usage.downloadsCount.toLocaleString()} total PDF downloads
@@ -284,64 +301,61 @@ export default function OrganizationDetailClient({
         </div>
       </div>
 
-      {/* 2. Governance Controls: Change Plan, Extend Expiry, Suspend/Unsuspend */}
+      {/* 2. Governance Controls: Grant Package, Extend Expiry, Suspend/Unsuspend */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Manual Plan Change */}
         <form
-          onSubmit={handleManualPlanSubmit}
+          onSubmit={handleGrantPackageSubmit}
           className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-xs"
         >
           <div>
             <h2 className="text-sm font-bold text-slate-900">
-              Change Plan Manually
+              Grant Package Manually
             </h2>
             <p className="text-xs text-slate-500">
-              Writes <code className="font-mono">superadmin.plan_changed</code>{" "}
-              to <code className="font-mono">audit_log</code>.
+              Adds an active package to <code className="font-mono">purchases</code>.
             </p>
           </div>
 
           <div>
             <label
-              htmlFor="manual-plan-select"
+              htmlFor="grant-preset"
               className="mb-1 block text-xs font-semibold text-slate-700"
             >
-              Target Plan
+              Preset Package
             </label>
             <select
-              id="manual-plan-select"
-              value={selectedPlanId}
-              onChange={(e) => setSelectedPlanId(e.target.value)}
-              className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-indigo-500 focus:outline-none"
+              id="grant-preset"
+              value={selectedPresetId}
+              onChange={(e) => setSelectedPresetId(e.target.value)}
+              className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900"
             >
-              {allPlans.map((p) => (
+              {presets.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} (PKR {p.pricePkr.toLocaleString()})
+                  {p.name} — PKR {p.pricing.totalPkr.toLocaleString()}
                 </option>
               ))}
             </select>
           </div>
 
-          {selectedPlanId !== "free" && (
-            <Input
-              label="Active Duration (Days)"
-              type="number"
-              min={1}
-              max={3660}
-              value={planDurationDays}
-              onChange={(e) => setPlanDurationDays(e.target.value)}
+          <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
+            <input
+              type="checkbox"
+              checked={grantIsPilot}
+              onChange={(e) => setGrantIsPilot(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600"
             />
-          )}
+            <span>Mark as Pilot (PKR 0, excluded from revenue)</span>
+          </label>
 
           <Input
-            label="Audit Reason (Optional)"
-            placeholder="e.g. Sponsored university partnership"
-            value={planReason}
-            onChange={(e) => setPlanReason(e.target.value)}
+            label="Audit Note (Optional)"
+            placeholder="e.g. University partnership pilot"
+            value={grantNote}
+            onChange={(e) => setGrantNote(e.target.value)}
           />
 
-          <Button type="submit" size="sm" loading={savingPlan}>
-            Save Plan Change
+          <Button type="submit" size="sm" loading={grantingPackage}>
+            Grant Active Package
           </Button>
         </form>
 
@@ -357,7 +371,7 @@ export default function OrganizationDetailClient({
               <strong>
                 {org.planExpiresAt
                   ? formatDateTime(org.planExpiresAt)
-                  : "None (non-expiring)"}
+                  : "None"}
               </strong>
             </p>
           </div>
@@ -418,18 +432,14 @@ export default function OrganizationDetailClient({
             </h2>
             <p className="mt-1 text-xs text-slate-600">
               {org.status === "active"
-                ? "Suspending revokes member logins, blocks dashboard access via RLS & server guards, and marks all public /e/[slug] pages unavailable immediately."
-                : "Admins are currently blocked from signing in and public event pages show unavailable."}
+                ? "Suspending revokes member logins and blocks all public /e/[slug] pages immediately."
+                : "Admins are blocked from signing in and public event pages show unavailable."}
             </p>
           </div>
 
           <Input
             label="Audit Note / Reason"
-            placeholder={
-              org.status === "active"
-                ? "e.g. Abuse report / unpaid chargeback"
-                : "e.g. Issue resolved"
-            }
+            placeholder="Reason"
             value={suspendReason}
             onChange={(e) => setSuspendReason(e.target.value)}
           />
@@ -447,7 +457,7 @@ export default function OrganizationDetailClient({
         </div>
       </div>
 
-      {/* 3. Organization Members (Read-Only — Impersonation Prohibited) */}
+      {/* 3. Organization Members (Impersonation Prohibited) */}
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-6 py-4">
           <div>
@@ -455,8 +465,7 @@ export default function OrganizationDetailClient({
               Members ({members.length})
             </h2>
             <p className="text-xs text-slate-500">
-              Organization owners &amp; admins. User impersonation is strictly
-              disabled.
+              User impersonation is strictly disabled.
             </p>
           </div>
           <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
@@ -518,7 +527,6 @@ export default function OrganizationDetailClient({
                   <th className="px-6 py-3">Title</th>
                   <th className="px-6 py-3">Public URL</th>
                   <th className="px-6 py-3">Portal State</th>
-                  <th className="px-6 py-3 text-right">Attendees</th>
                   <th className="px-6 py-3 text-right">Certificates</th>
                   <th className="px-6 py-3 text-right">Downloads</th>
                 </tr>
@@ -540,25 +548,10 @@ export default function OrganizationDetailClient({
                       </a>
                     </td>
                     <td className="px-6 py-3">
-                      {org.status === "suspended" ? (
-                        <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-800">
-                          Unavailable (Org Suspended)
-                        </span>
-                      ) : ev.released ? (
-                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                          Released
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
-                          Draft
-                        </span>
-                      )}
+                      {ev.released ? "Released" : "Draft"}
                     </td>
                     <td className="px-6 py-3 text-right font-mono">
-                      {ev.attendeeCount.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-3 text-right font-mono">
-                      {ev.certificatesIssuedCount.toLocaleString()}
+                      {ev.certificatesIssuedCount} / {ev.maxCertificates}
                     </td>
                     <td className="px-6 py-3 text-right font-mono">
                       {ev.downloadsCount.toLocaleString()}
@@ -571,12 +564,12 @@ export default function OrganizationDetailClient({
         )}
       </section>
 
-      {/* 5. Organization Payment Requests */}
-      {paymentRequests.length > 0 && (
+      {/* 5. Purchases & Top-Ups */}
+      {(purchases.length > 0 || topups.length > 0) && (
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
           <div className="border-b border-slate-100 px-6 py-4">
             <h2 className="text-base font-bold text-slate-900">
-              Payment Requests ({paymentRequests.length})
+              Purchases ({purchases.length}) &amp; Top-Ups ({topups.length})
             </h2>
           </div>
           <div className="overflow-x-auto">
@@ -584,56 +577,37 @@ export default function OrganizationDetailClient({
               <thead className="bg-slate-50 font-semibold uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-6 py-3">Date</th>
-                  <th className="px-6 py-3">Plan &amp; Amount</th>
-                  <th className="px-6 py-3">Method &amp; Ref</th>
-                  <th className="px-6 py-3">Proof</th>
+                  <th className="px-6 py-3">Item</th>
+                  <th className="px-6 py-3">Amount</th>
                   <th className="px-6 py-3">Status</th>
                   <th className="px-6 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-                {paymentRequests.map((req) => (
-                  <tr key={req.id}>
-                    <td className="px-6 py-3 whitespace-nowrap text-slate-500">
-                      {formatDateTime(req.createdAt)}
+                {purchases.map((p) => (
+                  <tr key={p.id}>
+                    <td className="px-6 py-3 text-slate-500">
+                      {formatDateTime(p.createdAt)}
                     </td>
-                    <td className="px-6 py-3 font-semibold text-slate-900">
-                      {req.planName} · PKR {req.amountPkr.toLocaleString()}
+                    <td className="px-6 py-3 font-semibold">
+                      {p.kind.toUpperCase()} ({p.eventsUsed}/{p.eventsTotal} events ·{" "}
+                      {p.certsPerEvent} certs · {p.months}m)
+                      {p.isPilot ? " [PILOT]" : ""}
                     </td>
-                    <td className="px-6 py-3">
-                      <span className="font-semibold uppercase">
-                        {req.paymentMethod}
-                      </span>{" "}
-                      ·{" "}
-                      <code className="font-mono text-slate-500">
-                        {req.transactionReference}
-                      </code>
+                    <td className="px-6 py-3 font-mono">
+                      PKR {p.finalPricePkr.toLocaleString()}
                     </td>
-                    <td className="px-6 py-3">
-                      {req.hasScreenshot ? (
-                        <a
-                          href={`/api/superadmin/payment-requests/${req.id}/screenshot`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-semibold text-indigo-600 hover:underline"
-                        >
-                          View Proof ↗
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="px-6 py-3 capitalize font-semibold">
-                      {req.status}
+                    <td className="px-6 py-3 uppercase font-semibold">
+                      {p.effectiveStatus}
                     </td>
                     <td className="px-6 py-3 text-right">
-                      {req.status === "pending" && (
+                      {p.status === "pending" && (
                         <div className="inline-flex gap-1.5">
                           <Button
                             size="sm"
-                            loading={reviewingPaymentId === req.id}
+                            loading={reviewingId === p.id}
                             onClick={() =>
-                              void handleDecision(req.id, "approved")
+                              void handlePurchaseDecision(p.id, "approved")
                             }
                           >
                             Approve
@@ -641,9 +615,51 @@ export default function OrganizationDetailClient({
                           <Button
                             variant="danger"
                             size="sm"
-                            loading={reviewingPaymentId === req.id}
+                            loading={reviewingId === p.id}
                             onClick={() =>
-                              void handleDecision(req.id, "rejected")
+                              void handlePurchaseDecision(p.id, "rejected")
+                            }
+                          >
+                            Reject
+                          </Button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+
+                {topups.map((t) => (
+                  <tr key={t.id}>
+                    <td className="px-6 py-3 text-slate-500">
+                      {formatDateTime(t.createdAt)}
+                    </td>
+                    <td className="px-6 py-3 font-semibold text-indigo-800">
+                      Top-Up +{t.certsAdded} certs ({t.eventTitle})
+                    </td>
+                    <td className="px-6 py-3 font-mono">
+                      PKR {t.amountPkr.toLocaleString()}
+                    </td>
+                    <td className="px-6 py-3 uppercase font-semibold">
+                      {t.status}
+                    </td>
+                    <td className="px-6 py-3 text-right">
+                      {t.status === "pending" && (
+                        <div className="inline-flex gap-1.5">
+                          <Button
+                            size="sm"
+                            loading={reviewingId === t.id}
+                            onClick={() =>
+                              void handleTopupDecision(t.id, "approved")
+                            }
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            loading={reviewingId === t.id}
+                            onClick={() =>
+                              void handleTopupDecision(t.id, "rejected")
                             }
                           >
                             Reject

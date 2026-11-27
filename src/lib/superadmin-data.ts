@@ -1,9 +1,18 @@
 import "server-only";
 
-import type { PlanDetails, PaymentMethod, PaymentRequestStatus } from "@/lib/dashboard-data";
+import {
+  mapPurchaseRow,
+  mapTopupRow,
+  type CertificateTopupRow,
+  type PurchaseRow,
+} from "@/lib/dashboard-data";
+import { isPlanExpired } from "@/lib/plan-enforcement-helpers";
+import type { PricedPlanPreset, PricingConfig } from "@/lib/pricing";
+import { getPricingAndPresets } from "@/lib/pricing-server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   buildMonthlyRevenueSeries,
+  type ApprovedPaymentForRevenue,
   type MonthlyRevenuePoint,
   type SuperAdminOrgRow,
 } from "@/lib/superadmin-helpers";
@@ -16,6 +25,20 @@ export interface PlatformAuditLogItem {
   action: string;
   details: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface ExpiringPurchaseOverviewItem {
+  purchaseId: string;
+  orgId: string;
+  orgName: string;
+  orgSlug: string;
+  kind: string;
+  eventsUsed: number;
+  eventsTotal: number;
+  certsPerEvent: number;
+  isPilot: boolean;
+  expiresAt: string;
+  daysRemaining: number;
 }
 
 export interface PlatformOverviewData {
@@ -31,27 +54,9 @@ export interface PlatformOverviewData {
   totalApprovedRevenuePkr: number;
   totalApprovedRequests: number;
   monthlyRevenue: MonthlyRevenuePoint[];
+  expiringWithin14Days: ExpiringPurchaseOverviewItem[];
+  pricingConfig: PricingConfig;
   recentAuditLogs: PlatformAuditLogItem[];
-}
-
-export interface SuperAdminPaymentRow {
-  id: string;
-  orgId: string;
-  orgName: string;
-  orgSlug: string;
-  orgStatus: "active" | "suspended";
-  planId: string;
-  planName: string;
-  amountPkr: number;
-  paymentMethod: PaymentMethod;
-  transactionReference: string;
-  hasScreenshot: boolean;
-  status: PaymentRequestStatus;
-  billingDays: number;
-  reviewerNote: string | null;
-  reviewedBy: string | null;
-  reviewedAt: string | null;
-  createdAt: string;
 }
 
 export interface SuperAdminMemberRow {
@@ -67,6 +72,8 @@ export interface SuperAdminEventRow {
   title: string;
   slug: string;
   released: boolean;
+  maxCertificates: number;
+  retentionUntil: string | null;
   eventDate: string | null;
   attendeeCount: number;
   certificatesIssuedCount: number;
@@ -80,41 +87,32 @@ export interface SuperAdminOrgDetailData {
     name: string;
     slug: string;
     planId: string;
+    packageLabel: string;
     status: "active" | "suspended";
     planExpiresAt: string | null;
     planExpiringSoon: boolean;
     createdAt: string;
     updatedAt: string;
   };
-  currentPlan: PlanDetails;
-  allPlans: PlanDetails[];
+  presets: PricedPlanPreset[];
   usage: {
     eventsCount: number;
+    eventsSlotsUsed: number;
+    eventsSlotsTotal: number;
     attendeesCount: number;
     certificatesIssuedCount: number;
     downloadsCount: number;
   };
   members: SuperAdminMemberRow[];
   events: SuperAdminEventRow[];
-  paymentRequests: SuperAdminPaymentRow[];
+  purchases: PurchaseRow[];
+  topups: CertificateTopupRow[];
   auditLogs: PlatformAuditLogItem[];
 }
 
-function mapPlan(p: Record<string, unknown>): PlanDetails {
-  return {
-    id: String(p.id ?? "free"),
-    name: String(p.name ?? p.id ?? "Free"),
-    maxEvents: (p.max_events as number | null) ?? null,
-    maxCertificatesPerEvent:
-      (p.max_certificates_per_event as number | null) ?? null,
-    maxCertificatesTotal: (p.max_certificates_total as number | null) ?? null,
-    maxCertificateTypesPerEvent:
-      p.max_certificate_types_per_event === undefined
-        ? null
-        : ((p.max_certificate_types_per_event as number | null) ?? null),
-    allowCustomBranding: Boolean(p.allow_custom_branding),
-    pricePkr: Number(p.price_pkr ?? 0),
-  };
+export interface SuperAdminPaymentsQueueData {
+  purchases: PurchaseRow[];
+  topups: CertificateTopupRow[];
 }
 
 async function fetchMembersAuthDirectory(
@@ -148,7 +146,6 @@ async function fetchMembersAuthDirectory(
     return Object.assign(flat, { byOrg });
   }
 
-  // Fallback if 012 RPC hasn't been executed yet: read organization_members + auth.admin.listUsers
   let q = admin
     .from("organization_members")
     .select("org_id, user_id, role, created_at")
@@ -197,17 +194,22 @@ async function fetchMembersAuthDirectory(
 
 export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
   const admin = getSupabaseAdmin();
+  const nowMs = Date.now();
+  const in14DaysMs = nowMs + 14 * 86_400_000;
 
   const [
+    { pricingConfig },
     orgsRes,
     eventsCountRes,
     releasedEventsRes,
     certsCountRes,
     downloadsCountRes,
-    paymentsRes,
+    purchasesRes,
+    topupsRes,
     auditRes,
   ] = await Promise.all([
-    admin.from("organizations").select("id, name, status, plan_id"),
+    getPricingAndPresets(),
+    admin.from("organizations").select("id, name, slug, status"),
     admin.from("events").select("id", { count: "exact", head: true }),
     admin
       .from("events")
@@ -218,8 +220,13 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
       .select("id", { count: "exact", head: true }),
     admin.from("download_log").select("id", { count: "exact", head: true }),
     admin
-      .from("payment_requests")
-      .select("amount_pkr, status, reviewed_at, created_at"),
+      .from("purchases")
+      .select(
+        "id, org_id, kind, events_used, events_total, certs_per_event, final_price_pkr, is_pilot, status, expires_at, reviewed_at, created_at",
+      ),
+    admin
+      .from("certificate_topups")
+      .select("id, org_id, amount_pkr, status, reviewed_at, created_at"),
     admin
       .from("audit_log")
       .select("id, org_id, user_id, action, details, created_at, organizations(name)")
@@ -228,31 +235,94 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
   ]);
 
   const orgs = (orgsRes.data ?? []) as Array<Record<string, unknown>>;
+  const orgLookup = new Map<
+    string,
+    { name: string; slug: string; status: string }
+  >();
   let activeOrgs = 0;
   let suspendedOrgs = 0;
-  let paidOrgs = 0;
   for (const o of orgs) {
-    if (o.status === "suspended") suspendedOrgs++;
+    const st = o.status === "suspended" ? "suspended" : "active";
+    if (st === "suspended") suspendedOrgs++;
     else activeOrgs++;
-    if (o.plan_id && o.plan_id !== "free") paidOrgs++;
+    orgLookup.set(String(o.id), {
+      name: String(o.name ?? ""),
+      slug: String(o.slug ?? ""),
+      status: st,
+    });
   }
 
-  const rawPayments = (paymentsRes.data ?? []) as Array<Record<string, unknown>>;
+  const paidOrgSet = new Set<string>();
+  const revenueItems: ApprovedPaymentForRevenue[] = [];
   let pendingPaymentsCount = 0;
-  const formattedPayments = rawPayments.map((p) => {
-    const st = (["pending", "approved", "rejected"].includes(String(p.status))
-      ? String(p.status)
-      : "pending") as "pending" | "approved" | "rejected";
-    if (st === "pending") pendingPaymentsCount++;
-    return {
-      amountPkr: Number(p.amount_pkr ?? 0),
-      status: st,
-      reviewedAt: typeof p.reviewed_at === "string" ? p.reviewed_at : null,
-      createdAt: String(p.created_at ?? ""),
-    };
-  });
+  const expiringWithin14Days: ExpiringPurchaseOverviewItem[] = [];
 
-  const revenueSummary = buildMonthlyRevenueSeries(formattedPayments, 6);
+  for (const p of (purchasesRes.data ?? []) as Array<Record<string, unknown>>) {
+    const status = String(p.status ?? "pending");
+    const orgId = String(p.org_id);
+    const isPilot = Boolean(p.is_pilot);
+    const expiresAt = typeof p.expires_at === "string" ? p.expires_at : null;
+
+    if (status === "pending") {
+      pendingPaymentsCount++;
+    }
+
+    if ((status === "active" || status === "expired") && !isPilot) {
+      paidOrgSet.add(orgId);
+      revenueItems.push({
+        amountPkr: Number(p.final_price_pkr ?? 0),
+        status: "approved",
+        reviewedAt: typeof p.reviewed_at === "string" ? p.reviewed_at : null,
+        createdAt: String(p.created_at ?? ""),
+      });
+    }
+
+    if (status === "active" && expiresAt) {
+      const expTs = Date.parse(expiresAt);
+      const orgMeta = orgLookup.get(orgId);
+      if (
+        Number.isFinite(expTs) &&
+        expTs > nowMs &&
+        expTs <= in14DaysMs &&
+        orgMeta?.status === "active"
+      ) {
+        expiringWithin14Days.push({
+          purchaseId: String(p.id),
+          orgId,
+          orgName: orgMeta.name,
+          orgSlug: orgMeta.slug,
+          kind: String(p.kind ?? "custom"),
+          eventsUsed: Number(p.events_used ?? 0),
+          eventsTotal: Number(p.events_total ?? 1),
+          certsPerEvent: Number(p.certs_per_event ?? 50),
+          isPilot,
+          expiresAt,
+          daysRemaining: Math.max(1, Math.ceil((expTs - nowMs) / 86_400_000)),
+        });
+      }
+    }
+  }
+
+  expiringWithin14Days.sort(
+    (a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt),
+  );
+
+  for (const t of (topupsRes.data ?? []) as Array<Record<string, unknown>>) {
+    const status = String(t.status ?? "pending");
+    if (status === "pending") {
+      pendingPaymentsCount++;
+    } else if (status === "approved") {
+      paidOrgSet.add(String(t.org_id));
+      revenueItems.push({
+        amountPkr: Number(t.amount_pkr ?? 0),
+        status: "approved",
+        reviewedAt: typeof t.reviewed_at === "string" ? t.reviewed_at : null,
+        createdAt: String(t.created_at ?? ""),
+      });
+    }
+  }
+
+  const revenueSummary = buildMonthlyRevenueSeries(revenueItems, 6);
 
   const recentAuditLogs: PlatformAuditLogItem[] = (
     (auditRes.data ?? []) as Array<Record<string, unknown>>
@@ -278,7 +348,7 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
     totalOrgs: orgs.length,
     activeOrgs,
     suspendedOrgs,
-    paidOrgs,
+    paidOrgs: paidOrgSet.size,
     totalEvents: eventsCountRes.count ?? 0,
     releasedEvents: releasedEventsRes.count ?? 0,
     totalCertificatesIssued: certsCountRes.count ?? 0,
@@ -287,33 +357,43 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
     totalApprovedRevenuePkr: revenueSummary.totalApprovedRevenuePkr,
     totalApprovedRequests: revenueSummary.totalApprovedRequests,
     monthlyRevenue: revenueSummary.series,
+    expiringWithin14Days,
+    pricingConfig,
     recentAuditLogs,
   };
 }
 
 export async function getSuperAdminOrganizationsData(): Promise<{
   organizations: SuperAdminOrgRow[];
-  plans: PlanDetails[];
+  presets: PricedPlanPreset[];
 }> {
   const admin = getSupabaseAdmin();
+  const nowMs = Date.now();
 
-  const [plansRes, orgsRes, eventsRes, certsRes, dlRes, membersDir] =
+  const [{ presets }, orgsRes, purchasesRes, eventsRes, certsRes, dlRes, membersDir] =
     await Promise.all([
-      admin.from("plans").select("*").order("price_pkr", { ascending: true }),
+      getPricingAndPresets(),
       admin
         .from("organizations")
         .select("*")
         .order("created_at", { ascending: false }),
+      admin
+        .from("purchases")
+        .select("org_id, kind, is_pilot, status, expires_at")
+        .order("expires_at", { ascending: true }),
       admin.from("events").select("org_id"),
       admin.from("attendee_certificates").select("org_id"),
       admin.from("download_log").select("org_id"),
       fetchMembersAuthDirectory(),
     ]);
 
-  const plans = ((plansRes.data ?? []) as Array<Record<string, unknown>>).map(
-    mapPlan,
-  );
-  const planNameById = new Map(plans.map((p) => [p.id, p.name]));
+  const purchasesByOrg = new Map<string, Array<Record<string, unknown>>>();
+  for (const p of (purchasesRes.data ?? []) as Array<Record<string, unknown>>) {
+    const oid = String(p.org_id);
+    const list = purchasesByOrg.get(oid) ?? [];
+    list.push(p);
+    purchasesByOrg.set(oid, list);
+  }
 
   const eventsByOrg = new Map<string, number>();
   for (const e of (eventsRes.data ?? []) as Array<{ org_id: string }>) {
@@ -334,8 +414,44 @@ export async function getSuperAdminOrganizationsData(): Promise<{
     (orgsRes.data ?? []) as Array<Record<string, unknown>>
   ).map((o) => {
     const orgId = String(o.id);
-    const planId = String(o.plan_id ?? "free");
     const orgMembers = membersDir.byOrg?.get(orgId) ?? [];
+    const orgPurchases = purchasesByOrg.get(orgId) ?? [];
+
+    const activeUnexp = orgPurchases.filter(
+      (p) =>
+        p.status === "active" &&
+        !isPlanExpired(
+          typeof p.expires_at === "string" ? p.expires_at : null,
+          nowMs,
+        ),
+    );
+    const pendingList = orgPurchases.filter((p) => p.status === "pending");
+
+    let planId = "none";
+    let planName = "No Package";
+    let planExpiresAt: string | null = null;
+
+    if (activeUnexp.length > 0) {
+      const p0 = activeUnexp[0];
+      planId = p0.is_pilot ? "pilot" : String(p0.kind ?? "custom");
+      planName =
+        activeUnexp.length > 1
+          ? `${activeUnexp.length} Active`
+          : p0.is_pilot
+            ? "Pilot"
+            : String(p0.kind ?? "Active").toUpperCase();
+      planExpiresAt =
+        typeof p0.expires_at === "string" ? p0.expires_at : null;
+    } else if (pendingList.length > 0) {
+      planId = "pending";
+      planName = "Pending";
+    } else if (orgPurchases.length > 0) {
+      planId = "expired";
+      planName = "Expired";
+      const last = orgPurchases[orgPurchases.length - 1];
+      planExpiresAt =
+        typeof last?.expires_at === "string" ? last.expires_at : null;
+    }
 
     let lastLoginAt: string | null = null;
     let ownerEmail: string | null = null;
@@ -355,10 +471,9 @@ export async function getSuperAdminOrganizationsData(): Promise<{
       name: String(o.name ?? ""),
       slug: String(o.slug ?? ""),
       planId,
-      planName: planNameById.get(planId) ?? planId,
+      planName,
       status: o.status === "suspended" ? "suspended" : "active",
-      planExpiresAt:
-        typeof o.plan_expires_at === "string" ? o.plan_expires_at : null,
+      planExpiresAt,
       eventsCount: eventsByOrg.get(orgId) ?? 0,
       certificatesIssuedCount: certsByOrg.get(orgId) ?? 0,
       downloadsCount: dlByOrg.get(orgId) ?? 0,
@@ -369,7 +484,7 @@ export async function getSuperAdminOrganizationsData(): Promise<{
     };
   });
 
-  return { organizations, plans };
+  return { organizations, presets };
 }
 
 export async function getSuperAdminOrganizationDetailData(
@@ -388,23 +503,26 @@ export async function getSuperAdminOrganizationDetailData(
 
   if (error || !orgRow) return null;
   const o = orgRow as Record<string, unknown>;
-  const planId = String(o.plan_id ?? "free");
+  const nowMs = Date.now();
 
   const [
-    plansRes,
+    { presets },
     membersDir,
     eventsRes,
     attendeesCountRes,
     certsRes,
     downloadsCountRes,
-    payReqsRes,
+    purchasesRes,
+    topupsRes,
     auditRes,
   ] = await Promise.all([
-    admin.from("plans").select("*").order("price_pkr", { ascending: true }),
+    getPricingAndPresets(),
     fetchMembersAuthDirectory(orgId),
     admin
       .from("events")
-      .select("id, title, slug, released, event_date, created_at, attendees(count)")
+      .select(
+        "id, title, slug, released, max_certificates, retention_until, event_date, created_at, attendees(count)",
+      )
       .eq("org_id", orgId)
       .order("created_at", { ascending: false }),
     admin
@@ -420,8 +538,13 @@ export async function getSuperAdminOrganizationDetailData(
       .select("id", { count: "exact", head: true })
       .eq("org_id", orgId),
     admin
-      .from("payment_requests")
+      .from("purchases")
       .select("*")
+      .eq("org_id", orgId)
+      .order("created_at", { ascending: false }),
+    admin
+      .from("certificate_topups")
+      .select("*, events(title)")
       .eq("org_id", orgId)
       .order("created_at", { ascending: false }),
     admin
@@ -432,22 +555,21 @@ export async function getSuperAdminOrganizationDetailData(
       .limit(25),
   ]);
 
-  const allPlans = (
-    (plansRes.data ?? []) as Array<Record<string, unknown>>
-  ).map(mapPlan);
-  const planNameById = new Map(allPlans.map((p) => [p.id, p.name]));
-  const currentPlan =
-    allPlans.find((p) => p.id === planId) ??
-    allPlans[0] ?? {
-      id: planId,
-      name: planId,
-      maxEvents: 1,
-      maxCertificatesPerEvent: 50,
-      maxCertificatesTotal: 50,
-      maxCertificateTypesPerEvent: 3,
-      allowCustomBranding: false,
-      pricePkr: 0,
-    };
+  const purchases = (
+    (purchasesRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapPurchaseRow(r, nowMs));
+
+  const activePurchases = purchases.filter(
+    (p) => p.effectiveStatus === "active",
+  );
+  const eventsSlotsUsed = activePurchases.reduce(
+    (s, p) => s + p.eventsUsed,
+    0,
+  );
+  const eventsSlotsTotal = activePurchases.reduce(
+    (s, p) => s + p.eventsTotal,
+    0,
+  );
 
   const certsByEvent = new Map<string, { issued: number; downloads: number }>();
   for (const c of (certsRes.data ?? []) as Array<{
@@ -478,6 +600,9 @@ export async function getSuperAdminOrganizationDetailData(
       title: String(ev.title ?? ""),
       slug: String(ev.slug ?? ""),
       released: Boolean(ev.released),
+      maxCertificates: Math.max(1, Number(ev.max_certificates ?? 50)),
+      retentionUntil:
+        typeof ev.retention_until === "string" ? ev.retention_until : null,
       eventDate: typeof ev.event_date === "string" ? ev.event_date : null,
       attendeeCount,
       certificatesIssuedCount: cStats.issued,
@@ -486,40 +611,26 @@ export async function getSuperAdminOrganizationDetailData(
     };
   });
 
+  const eventTitleById = new Map(events.map((e) => [e.id, e.title]));
+  const topups = (
+    (topupsRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapTopupRow(r, eventTitleById));
+
   const orgStatus: "active" | "suspended" =
     o.status === "suspended" ? "suspended" : "active";
 
-  const paymentRequests: SuperAdminPaymentRow[] = (
-    (payReqsRes.data ?? []) as Array<Record<string, unknown>>
-  ).map((r) => {
-    const rPlanId = String(r.plan_id ?? "starter");
-    return {
-      id: String(r.id),
-      orgId,
-      orgName: String(o.name ?? ""),
-      orgSlug: String(o.slug ?? ""),
-      orgStatus,
-      planId: rPlanId,
-      planName: planNameById.get(rPlanId) ?? rPlanId,
-      amountPkr: Number(r.amount_pkr ?? 0),
-      paymentMethod: (["bank", "jazzcash", "easypaisa"].includes(
-        String(r.payment_method),
-      )
-        ? String(r.payment_method)
-        : "bank") as PaymentMethod,
-      transactionReference: String(r.transaction_reference ?? ""),
-      hasScreenshot: Boolean(r.screenshot_path),
-      status: (["pending", "approved", "rejected"].includes(String(r.status))
-        ? String(r.status)
-        : "pending") as PaymentRequestStatus,
-      billingDays: Number(r.billing_days ?? 30),
-      reviewerNote:
-        typeof r.reviewer_note === "string" ? r.reviewer_note : null,
-      reviewedBy: typeof r.reviewed_by === "string" ? r.reviewed_by : null,
-      reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
-      createdAt: String(r.created_at ?? ""),
-    };
-  });
+  const packageLabel =
+    activePurchases.length > 0
+      ? activePurchases[0].isPilot
+        ? "Pilot Package"
+        : `${activePurchases[0].kind.toUpperCase()} Package`
+      : purchases.some((p) => p.status === "pending")
+        ? "Pending Approval"
+        : purchases.length > 0
+          ? "Expired"
+          : "No Package";
+
+  const soonestExp = activePurchases[0]?.expiresAt ?? purchases[0]?.expiresAt ?? null;
 
   const auditLogs: PlatformAuditLogItem[] = (
     (auditRes.data ?? []) as Array<Record<string, unknown>>
@@ -541,78 +652,55 @@ export async function getSuperAdminOrganizationDetailData(
       id: orgId,
       name: String(o.name ?? ""),
       slug: String(o.slug ?? ""),
-      planId,
+      planId: String(o.plan_id ?? "none"),
+      packageLabel,
       status: orgStatus,
-      planExpiresAt:
-        typeof o.plan_expires_at === "string" ? o.plan_expires_at : null,
+      planExpiresAt: soonestExp,
       planExpiringSoon: Boolean(o.plan_expiring_soon),
       createdAt: String(o.created_at ?? ""),
       updatedAt: String(o.updated_at ?? o.created_at ?? ""),
     },
-    currentPlan,
-    allPlans,
+    presets,
     usage: {
       eventsCount: events.length,
+      eventsSlotsUsed,
+      eventsSlotsTotal,
       attendeesCount: attendeesCountRes.count ?? 0,
       certificatesIssuedCount: (certsRes.data ?? []).length,
       downloadsCount: downloadsCountRes.count ?? 0,
     },
     members: membersDir,
     events,
-    paymentRequests,
+    purchases,
+    topups,
     auditLogs,
   };
 }
 
-export async function getSuperAdminPaymentRequestsData(): Promise<
-  SuperAdminPaymentRow[]
-> {
+export async function getSuperAdminPaymentsQueueData(): Promise<SuperAdminPaymentsQueueData> {
   const admin = getSupabaseAdmin();
-  const [plansRes, reqsRes] = await Promise.all([
-    admin.from("plans").select("id, name"),
+  const nowMs = Date.now();
+
+  const [purchasesRes, topupsRes] = await Promise.all([
     admin
-      .from("payment_requests")
-      .select("*, organizations(id, name, slug, status)")
+      .from("purchases")
+      .select("*, organizations(name)")
+      .order("created_at", { ascending: false })
+      .limit(200),
+    admin
+      .from("certificate_topups")
+      .select("*, organizations(name), events(title)")
       .order("created_at", { ascending: false })
       .limit(200),
   ]);
 
-  const planNameById = new Map<string, string>();
-  for (const p of (plansRes.data ?? []) as Array<{ id: string; name: string }>) {
-    planNameById.set(p.id, p.name);
-  }
+  const purchases = (
+    (purchasesRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapPurchaseRow(r, nowMs));
 
-  return ((reqsRes.data ?? []) as Array<Record<string, unknown>>).map((r) => {
-    const orgRel = Array.isArray(r.organizations)
-      ? (r.organizations[0] as Record<string, unknown> | undefined)
-      : (r.organizations as Record<string, unknown> | undefined);
-    const planId = String(r.plan_id ?? "starter");
+  const topups = (
+    (topupsRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapTopupRow(r, new Map()));
 
-    return {
-      id: String(r.id),
-      orgId: String(r.org_id),
-      orgName: String(orgRel?.name ?? r.org_id),
-      orgSlug: String(orgRel?.slug ?? ""),
-      orgStatus: orgRel?.status === "suspended" ? "suspended" : "active",
-      planId,
-      planName: planNameById.get(planId) ?? planId,
-      amountPkr: Number(r.amount_pkr ?? 0),
-      paymentMethod: (["bank", "jazzcash", "easypaisa"].includes(
-        String(r.payment_method),
-      )
-        ? String(r.payment_method)
-        : "bank") as PaymentMethod,
-      transactionReference: String(r.transaction_reference ?? ""),
-      hasScreenshot: Boolean(r.screenshot_path),
-      status: (["pending", "approved", "rejected"].includes(String(r.status))
-        ? String(r.status)
-        : "pending") as PaymentRequestStatus,
-      billingDays: Number(r.billing_days ?? 30),
-      reviewerNote:
-        typeof r.reviewer_note === "string" ? r.reviewer_note : null,
-      reviewedBy: typeof r.reviewed_by === "string" ? r.reviewed_by : null,
-      reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
-      createdAt: String(r.created_at ?? ""),
-    };
-  });
+  return { purchases, topups };
 }

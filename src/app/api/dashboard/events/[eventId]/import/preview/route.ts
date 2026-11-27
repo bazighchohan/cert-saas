@@ -41,8 +41,15 @@ export async function POST(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
+
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return NextResponse.json(
@@ -53,12 +60,6 @@ export async function POST(
     throw err;
   }
 
-  const { eventId: rawEventId } = await context.params;
-  const evParsed = UuidSchema.safeParse(rawEventId);
-  if (!evParsed.success) {
-    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
-  }
-  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const parsedBody = await parseValidatedJson(
@@ -73,7 +74,7 @@ export async function POST(
   const rows = parsedBody.data.rows;
   const mapping = parsedBody.data.mapping as ColumnMappingConfig;
 
-  const [eventRes, typesRes, planRes, eventCertsRes, orgCertsRes] =
+  const [eventRes, typesRes, eventCertsRes, orgCertsRes] =
     await Promise.all([
       supabase
         .from("events")
@@ -87,7 +88,6 @@ export async function POST(
         .eq("org_id", org.id)
         .eq("event_id", eventId)
         .order("created_at", { ascending: true }),
-      supabase.from("plans").select("*").eq("id", org.planId).maybeSingle(),
       supabase
         .from("attendee_certificates")
         .select("id", { count: "exact", head: true })
@@ -147,16 +147,10 @@ export async function POST(
     pageOffset += FETCH_CHUNK;
   }
 
-  const planRow = planRes.data as Record<string, unknown> | null;
-  const planName = (planRow?.name as string) ?? org.planId;
-  const maxCertificatesPerEvent =
-    planRow?.max_certificates_per_event === undefined
-      ? 50
-      : ((planRow.max_certificates_per_event as number | null) ?? null);
-  const maxCertificatesTotal =
-    planRow?.max_certificates_total === undefined
-      ? 50
-      : ((planRow.max_certificates_total as number | null) ?? null);
+  const maxCertificatesPerEvent = Math.max(
+    1,
+    Number(ev.max_certificates ?? 50),
+  );
 
   try {
     const report = validateMappedImportRows({
@@ -171,12 +165,12 @@ export async function POST(
       })),
       existingByLowerId,
       quotaContext: {
-        planName,
+        planName: org.packageLabel,
         eventAttendeesCurrent: existingByLowerId.size,
         eventCertsCurrent: eventCertsRes.count ?? 0,
         maxCertificatesPerEvent,
         orgCertsCurrent: orgCertsRes.count ?? 0,
-        maxCertificatesTotal,
+        maxCertificatesTotal: null,
       },
     });
 

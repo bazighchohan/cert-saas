@@ -17,7 +17,6 @@ export default async function DashboardEventsPage({
     searchParams,
   ]);
 
-  // Tenant isolation guard: if a URL explicitly asks for another org's id or slug, reject it.
   if (
     (params.orgId && params.orgId !== usage.org.id) ||
     (params.org && params.org !== usage.org.slug)
@@ -28,9 +27,11 @@ export default async function DashboardEventsPage({
   return (
     <EventsListClient
       events={events}
-      eventsUsed={usage.eventsUsed}
-      maxEvents={usage.plan.maxEvents}
-      planName={usage.plan.name}
+      eventsSlotsUsed={usage.eventsSlotsUsed}
+      eventsSlotsTotal={usage.eventsSlotsTotal}
+      soonestActiveExpiry={usage.soonestActiveExpiry}
+      packageLabel={usage.org.packageLabel}
+      createEventBlock={usage.createEventBlock}
     />
   );
 }

@@ -76,9 +76,8 @@ async function enforceAttendeePlan(
   addingNewAttendee = false,
 ): Promise<{ ok: true } | { ok: false; error: string; code: PlanErrorCode }> {
   try {
-    await assertWithinPlan(orgId, {
+    await assertWithinPlan(orgId, eventId, {
       kind: addingNewAttendee ? "attendee" : "certificate",
-      eventId,
       addAttendees: addingNewAttendee ? 1 : 0,
       addCertificates: newCertificatesCount,
     });
@@ -93,9 +92,10 @@ async function enforceAttendeePlan(
 
 async function enforceWriteAccess(
   orgId: string,
+  eventId?: string,
 ): Promise<{ ok: true } | { ok: false; error: string; code: PlanErrorCode }> {
   try {
-    await assertWithinPlan(orgId, "write");
+    await assertWithinPlan(orgId, eventId ?? null, "write");
     return { ok: true };
   } catch (err) {
     if (isPlanEnforcementError(err)) {
@@ -123,7 +123,7 @@ export async function addAttendeeAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }
@@ -290,7 +290,7 @@ export async function updateAttendeeAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }
@@ -401,7 +401,7 @@ export async function deleteAttendeeAction(input: {
     return { error: formatZodError(delParsed.error), code: "VALIDATION_ERROR" };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }
@@ -465,7 +465,7 @@ export async function bulkDeleteAttendeesAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }
@@ -617,7 +617,7 @@ export async function setAttendeeCertificateTypeAction(input: {
   }
 
   // Unassign
-  const unassignGuard = await enforceWriteAccess(org.id);
+  const unassignGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!unassignGuard.ok) {
     return { error: unassignGuard.error, code: unassignGuard.code };
   }
@@ -788,7 +788,7 @@ export async function bulkSetCertificateTypeAction(input: {
   }
 
   // Bulk unassign
-  const bulkUnassignGuard = await enforceWriteAccess(org.id);
+  const bulkUnassignGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!bulkUnassignGuard.ok) {
     return { error: bulkUnassignGuard.error, code: bulkUnassignGuard.code };
   }
@@ -854,7 +854,7 @@ export async function resetAttendeeDownloadsAction(input: {
     return { error: formatZodError(resetParsed.error), code: "VALIDATION_ERROR" };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }
@@ -935,7 +935,7 @@ export async function saveAttendeeIssueNoteAction(input: {
     return { error: "You must be signed in." };
   }
 
-  const writeGuard = await enforceWriteAccess(org.id);
+  const writeGuard = await enforceWriteAccess(org.id, input.eventId);
   if (!writeGuard.ok) {
     return { error: writeGuard.error, code: writeGuard.code };
   }

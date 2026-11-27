@@ -1,10 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { computePrice } from "@/lib/pricing";
+import { getPricingAndPresets } from "@/lib/pricing-server";
 import {
   ReviewPaymentActionSchema,
-  SuperAdminChangePlanSchema,
+  ReviewPurchaseActionSchema,
+  ReviewTopupActionSchema,
   SuperAdminExtendExpirySchema,
+  SuperAdminGrantPackageSchema,
+  SuperAdminPricingConfigSchema,
   SuperAdminSuspendSchema,
 } from "@/lib/schemas";
 import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
@@ -19,12 +24,7 @@ export interface SuperAdminActionResult {
 
 /**
  * Suspends or unsuspends an organization.
- * - Accessible ONLY to users listed in `public.super_admins`.
- * - When suspending: sets `organizations.status = 'suspended'`, revokes active
- *   refresh tokens for all organization members (unless that member is also a
- *   platform super_admin), and immediately blocks both admin login/dashboard
- *   and public `/e/[slug]` pages.
- * - Writes `superadmin.org_suspended` or `superadmin.org_unsuspended` to `audit_log`.
+ * Accessible ONLY to users listed in `public.super_admins`.
  */
 export async function setOrganizationSuspendedAction(input: {
   orgId: string;
@@ -70,7 +70,6 @@ export async function setOrganizationSuspendedAction(input: {
     };
   }
 
-  // If suspending, also revoke Supabase refresh sessions for non-superadmin members
   if (input.suspended) {
     try {
       const [{ data: members }, { data: allSupers }] = await Promise.all([
@@ -90,15 +89,15 @@ export async function setOrganizationSuspendedAction(input: {
         try {
           await admin.auth.admin.signOut(uid, "global");
         } catch {
-          // Ignore if session already inactive or GoTrue admin signOut unsupported
+          // Ignore if session already inactive
         }
       }
     } catch {
-      // Non-fatal: RLS + getCurrentOrg + layout redirect already enforce instant block
+      // Non-fatal
     }
   }
 
-  const { error: auditErr } = await admin.from("audit_log").insert({
+  await admin.from("audit_log").insert({
     org_id: input.orgId,
     user_id: superAdmin.id,
     action: input.suspended
@@ -112,25 +111,24 @@ export async function setOrganizationSuspendedAction(input: {
     },
   });
 
-  if (auditErr) {
-    console.error("[superadmin] audit_log write failed:", auditErr);
-  }
-
   revalidatePath("/superadmin", "layout");
   revalidatePath("/dashboard", "layout");
-  revalidatePath(`/e`);
+  revalidatePath("/e");
   return { success: true };
 }
 
 /**
- * Manually changes an organization's plan (`free`, `starter`, `pro`, etc.)
- * and updates `plan_expires_at`. Writes `superadmin.plan_changed` to `audit_log`.
+ * Grants an immediate `active` package (`is_pilot` or manual) to an organization.
+ * Accessible ONLY to users listed in `public.super_admins`.
  */
-export async function changeOrganizationPlanManuallyAction(input: {
+export async function superAdminGrantPackageAction(input: {
   orgId: string;
-  planId: string;
-  durationDays?: number | null;
-  reason?: string;
+  planId?: string;
+  eventsTotal: number;
+  certsPerEvent: number;
+  months: 3 | 6 | 12;
+  isPilot?: boolean;
+  note?: string;
 }): Promise<SuperAdminActionResult> {
   const superAdmin = await getCurrentSuperAdmin();
   if (!superAdmin) {
@@ -139,81 +137,117 @@ export async function changeOrganizationPlanManuallyAction(input: {
     };
   }
 
-  const parsed = SuperAdminChangePlanSchema.safeParse(input);
+  const parsed = SuperAdminGrantPackageSchema.safeParse(input);
   if (!parsed.success) {
     return { error: formatZodError(parsed.error) };
   }
 
-  const cleanPlanId = parsed.data.planId;
   const admin = getSupabaseAdmin();
+  const { data: orgRow } = await admin
+    .from("organizations")
+    .select("id, name")
+    .eq("id", parsed.data.orgId)
+    .maybeSingle();
 
-  const [orgRes, planRes] = await Promise.all([
-    admin
-      .from("organizations")
-      .select("id, name, plan_id, plan_expires_at")
-      .eq("id", input.orgId)
-      .maybeSingle(),
-    admin
-      .from("plans")
-      .select("id, name, price_pkr")
-      .eq("id", cleanPlanId)
-      .maybeSingle(),
-  ]);
-
-  if (!orgRes.data) {
+  if (!orgRow) {
     return { error: "Organization not found." };
   }
-  if (!planRes.data) {
-    return { error: `Plan "${cleanPlanId}" does not exist.` };
+
+  const { pricingConfig, presets } = await getPricingAndPresets();
+  const matchedPreset = parsed.data.planId
+    ? presets.find((p) => p.id === parsed.data.planId)
+    : undefined;
+
+  const eventsTotal = matchedPreset
+    ? matchedPreset.eventsCount
+    : parsed.data.eventsTotal;
+  const certsPerEvent = matchedPreset
+    ? matchedPreset.certsPerEvent
+    : parsed.data.certsPerEvent;
+  const months = matchedPreset ? matchedPreset.months : parsed.data.months;
+  const kind = matchedPreset ? matchedPreset.kind : "custom";
+
+  let listPricePkr = 0;
+  let discountPkr = 0;
+  let finalPricePkr = 0;
+  if (!parsed.data.isPilot) {
+    try {
+      const calc = computePrice(
+        { events: eventsTotal, certsPerEvent, months },
+        pricingConfig,
+      );
+      listPricePkr = calc.listPricePkr;
+      discountPkr = calc.discountPkr;
+      finalPricePkr = calc.finalPricePkr;
+    } catch {
+      finalPricePkr =
+        eventsTotal *
+        (pricingConfig.eventFeePkr + pricingConfig.certRatePkr * certsPerEvent);
+      listPricePkr = finalPricePkr;
+    }
   }
 
-  let nextExpiresAt: string | null = null;
-  if (cleanPlanId !== "free") {
-    const days = Math.min(
-      3660,
-      Math.max(1, Math.floor(input.durationDays ?? 30)),
-    );
-    nextExpiresAt = computeExtendedExpiryIso(null, days);
-  } else if (input.durationDays && input.durationDays > 0) {
-    nextExpiresAt = computeExtendedExpiryIso(null, input.durationDays);
-  }
+  const now = new Date();
+  const expires = new Date(now.getTime());
+  expires.setUTCMonth(expires.getUTCMonth() + months);
 
-  const { error: updErr } = await admin
-    .from("organizations")
-    .update({
-      plan_id: cleanPlanId,
-      plan_expires_at: nextExpiresAt,
-      plan_expiring_soon: false,
-      expiry_flagged_at: null,
+  const { data: created, error: insErr } = await admin
+    .from("purchases")
+    .insert({
+      org_id: parsed.data.orgId,
+      plan_id: matchedPreset ? matchedPreset.id : null,
+      kind,
+      events_total: eventsTotal,
+      events_used: 0,
+      certs_per_event: certsPerEvent,
+      months,
+      list_price_pkr: listPricePkr,
+      discount_pkr: discountPkr,
+      final_price_pkr: finalPricePkr,
+      is_pilot: parsed.data.isPilot,
+      payment_method: parsed.data.isPilot ? "pilot" : "manual",
+      payment_note: parsed.data.note || null,
+      status: "active",
+      starts_at: now.toISOString(),
+      expires_at: expires.toISOString(),
+      reviewed_by: superAdmin.email,
+      reviewed_at: now.toISOString(),
     })
-    .eq("id", input.orgId);
+    .select("id, expires_at")
+    .maybeSingle();
 
-  if (updErr) {
+  if (insErr || !created) {
     return {
-      error: sanitizeClientErrorMessage(
-        updErr,
-        "Failed to change organization plan.",
-      ),
+      error: sanitizeClientErrorMessage(insErr, "Failed to grant package."),
     };
   }
 
-  const { error: auditErr } = await admin.from("audit_log").insert({
-    org_id: input.orgId,
+  await admin
+    .from("organizations")
+    .update({
+      plan_id: matchedPreset ? matchedPreset.id : null,
+      plan_expires_at: created.expires_at,
+      plan_expiring_soon: false,
+    })
+    .eq("id", parsed.data.orgId);
+
+  await admin.from("audit_log").insert({
+    org_id: parsed.data.orgId,
     user_id: superAdmin.id,
-    action: "superadmin.plan_changed",
+    action: "superadmin.package_granted",
     details: {
-      previous_plan_id: orgRes.data.plan_id,
-      new_plan_id: cleanPlanId,
-      previous_expires_at: orgRes.data.plan_expires_at,
-      new_expires_at: nextExpiresAt,
-      reason: input.reason?.trim() || null,
+      purchase_id: created.id,
+      kind,
+      events_total: eventsTotal,
+      certs_per_event: certsPerEvent,
+      months,
+      is_pilot: parsed.data.isPilot,
+      final_price_pkr: finalPricePkr,
+      expires_at: created.expires_at,
+      note: parsed.data.note || null,
       superadmin_email: superAdmin.email,
     },
   });
-
-  if (auditErr) {
-    console.error("[superadmin] audit_log write failed:", auditErr);
-  }
 
   revalidatePath("/superadmin", "layout");
   revalidatePath("/dashboard", "layout");
@@ -221,13 +255,13 @@ export async function changeOrganizationPlanManuallyAction(input: {
 }
 
 /**
- * Extends (or sets an exact date for) an organization's `plan_expires_at`.
- * Writes `superadmin.expiry_extended` to `audit_log`.
+ * Extends expiry on an organization's active/latest purchase (and `organizations.plan_expires_at`).
  */
 export async function extendOrganizationExpiryAction(input: {
   orgId: string;
+  purchaseId?: string;
   addDays?: number;
-  exactDate?: string; // YYYY-MM-DD
+  exactDate?: string;
   clearExpiry?: boolean;
   reason?: string;
 }): Promise<SuperAdminActionResult> {
@@ -244,27 +278,49 @@ export async function extendOrganizationExpiryAction(input: {
   }
 
   const admin = getSupabaseAdmin();
-  const { data: orgRow } = await admin
-    .from("organizations")
-    .select("id, name, plan_id, plan_expires_at")
-    .eq("id", parsed.data.orgId)
-    .maybeSingle();
 
-  if (!orgRow) {
-    return { error: "Organization not found." };
+  let targetQuery = admin
+    .from("purchases")
+    .select("id, org_id, status, expires_at")
+    .eq("org_id", parsed.data.orgId)
+    .in("status", ["active", "expired"])
+    .order("expires_at", { ascending: false })
+    .limit(1);
+
+  if (parsed.data.purchaseId) {
+    targetQuery = admin
+      .from("purchases")
+      .select("id, org_id, status, expires_at")
+      .eq("org_id", parsed.data.orgId)
+      .eq("id", parsed.data.purchaseId)
+      .limit(1);
   }
 
+  const { data: purRows } = await targetQuery;
+  const targetPurchase = purRows?.[0] as
+    | { id: string; expires_at: string | null; status: string }
+    | undefined;
+
   let newExpiresAt: string | null = null;
-  if (input.clearExpiry) {
-    newExpiresAt = null;
-  } else if (input.exactDate && /^\d{4}-\d{2}-\d{2}$/.test(input.exactDate.trim())) {
-    newExpiresAt = `${input.exactDate.trim()}T23:59:59.999Z`;
+  if (parsed.data.exactDate && /^\d{4}-\d{2}-\d{2}$/.test(parsed.data.exactDate)) {
+    newExpiresAt = `${parsed.data.exactDate}T23:59:59.999Z`;
   } else {
-    const days = Math.min(3660, Math.max(1, Math.floor(input.addDays ?? 30)));
+    const days = Math.min(3660, Math.max(1, Math.floor(parsed.data.addDays ?? 30)));
     newExpiresAt = computeExtendedExpiryIso(
-      typeof orgRow.plan_expires_at === "string" ? orgRow.plan_expires_at : null,
+      targetPurchase?.expires_at ?? null,
       days,
     );
+  }
+
+  if (targetPurchase) {
+    await admin
+      .from("purchases")
+      .update({
+        status: "active",
+        expires_at: newExpiresAt,
+      })
+      .eq("id", targetPurchase.id)
+      .eq("org_id", parsed.data.orgId);
   }
 
   const { error: updErr } = await admin
@@ -274,34 +330,93 @@ export async function extendOrganizationExpiryAction(input: {
       plan_expiring_soon: false,
       expiry_flagged_at: null,
     })
-    .eq("id", input.orgId);
+    .eq("id", parsed.data.orgId);
 
   if (updErr) {
     return {
       error: sanitizeClientErrorMessage(
         updErr,
-        "Failed to extend plan expiration.",
+        "Failed to extend expiration.",
       ),
     };
   }
 
-  const { error: auditErr } = await admin.from("audit_log").insert({
-    org_id: input.orgId,
+  await admin.from("audit_log").insert({
+    org_id: parsed.data.orgId,
     user_id: superAdmin.id,
     action: "superadmin.expiry_extended",
     details: {
-      plan_id: orgRow.plan_id,
-      previous_expires_at: orgRow.plan_expires_at,
+      purchase_id: targetPurchase?.id ?? null,
+      previous_expires_at: targetPurchase?.expires_at ?? null,
       new_expires_at: newExpiresAt,
-      add_days: input.addDays ?? null,
-      exact_date: input.exactDate ?? null,
-      reason: input.reason?.trim() || null,
+      add_days: parsed.data.addDays ?? null,
+      exact_date: parsed.data.exactDate ?? null,
+      reason: parsed.data.reason || null,
       superadmin_email: superAdmin.email,
     },
   });
 
-  if (auditErr) {
-    console.error("[superadmin] audit_log write failed:", auditErr);
+  revalidatePath("/superadmin", "layout");
+  revalidatePath("/dashboard", "layout");
+  return { success: true };
+}
+
+/**
+ * Approves or rejects a `pending` package purchase (`public.purchases`).
+ */
+export async function superAdminReviewPurchaseAction(input: {
+  purchaseId: string;
+  decision: "approved" | "rejected";
+  note?: string;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: your account is not listed in public.super_admins.",
+    };
+  }
+
+  const parsed = ReviewPurchaseActionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: rpcRows, error } = await admin.rpc("review_purchase_request", {
+    p_purchase_id: parsed.data.purchaseId,
+    p_decision: parsed.data.decision,
+    p_reviewer: superAdmin.email,
+    p_note: parsed.data.note || null,
+  });
+
+  if (error) {
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Failed to review package purchase.",
+      ),
+    };
+  }
+
+  const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | { org_id?: string; expires_at?: string }
+    | undefined;
+
+  if (row?.org_id) {
+    await admin.from("audit_log").insert({
+      org_id: row.org_id,
+      user_id: superAdmin.id,
+      action:
+        parsed.data.decision === "approved"
+          ? "superadmin.purchase_approved"
+          : "superadmin.purchase_rejected",
+      details: {
+        purchase_id: parsed.data.purchaseId,
+        expires_at: row.expires_at ?? null,
+        note: parsed.data.note || null,
+        superadmin_email: superAdmin.email,
+      },
+    });
   }
 
   revalidatePath("/superadmin", "layout");
@@ -310,10 +425,168 @@ export async function extendOrganizationExpiryAction(input: {
 }
 
 /**
- * Approves or rejects a pending `payment_requests` row from `/superadmin/payments`
- * or `/superadmin/organizations/[orgId]`.
- * Writes both `billing.plan_upgraded` / `billing.payment_rejected` (via DB trigger)
- * AND `superadmin.payment_approved` / `superadmin.payment_rejected` (with `user_id = superAdmin.id`).
+ * Approves or rejects a `pending` certificate top-up (`public.certificate_topups`).
+ * Approving atomically raises `events.max_certificates`.
+ */
+export async function superAdminReviewTopupAction(input: {
+  topupId: string;
+  decision: "approved" | "rejected";
+  note?: string;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: your account is not listed in public.super_admins.",
+    };
+  }
+
+  const parsed = ReviewTopupActionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: rpcRows, error } = await admin.rpc("review_certificate_topup", {
+    p_topup_id: parsed.data.topupId,
+    p_decision: parsed.data.decision,
+    p_reviewer: superAdmin.email,
+    p_note: parsed.data.note || null,
+  });
+
+  if (error) {
+    return {
+      error: sanitizeClientErrorMessage(
+        error,
+        "Failed to review certificate top-up.",
+      ),
+    };
+  }
+
+  const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | { org_id?: string; event_id?: string; new_max_certificates?: number }
+    | undefined;
+
+  if (row?.org_id) {
+    await admin.from("audit_log").insert({
+      org_id: row.org_id,
+      user_id: superAdmin.id,
+      action:
+        parsed.data.decision === "approved"
+          ? "superadmin.topup_approved"
+          : "superadmin.topup_rejected",
+      details: {
+        topup_id: parsed.data.topupId,
+        event_id: row.event_id ?? null,
+        new_max_certificates: row.new_max_certificates ?? null,
+        note: parsed.data.note || null,
+        superadmin_email: superAdmin.email,
+      },
+    });
+  }
+
+  revalidatePath("/superadmin", "layout");
+  revalidatePath("/dashboard", "layout");
+  return { success: true };
+}
+
+/**
+ * Updates the single `public.pricing_config` row.
+ * Accessible ONLY to users listed in `public.super_admins`.
+ * Immediately updates all computed prices across landing, billing, and server
+ * without requiring a deployment.
+ */
+export async function superAdminUpdatePricingConfigAction(input: {
+  eventFeePkr: number;
+  certRatePkr: number;
+  roundingPkr: number;
+  minEvents: number;
+  maxEvents: number;
+  minCertsPerEvent: number;
+  maxCertsPerEvent: number;
+  certsStep: number;
+  volumeDiscounts: Array<{ min_events: number; discount: number }>;
+  durationMultipliers: Array<{ months: number; mult: number }>;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: only super_admins can edit pricing_config.",
+    };
+  }
+
+  const parsed = SuperAdminPricingConfigSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const d = parsed.data;
+  if (d.maxEvents < d.minEvents) {
+    return { error: "maxEvents must be >= minEvents." };
+  }
+  if (d.maxCertsPerEvent < d.minCertsPerEvent) {
+    return { error: "maxCertsPerEvent must be >= minCertsPerEvent." };
+  }
+
+  const allowedMonths = d.durationMultipliers.map((m) => m.months);
+  const admin = getSupabaseAdmin();
+
+  const { error: updErr } = await admin
+    .from("pricing_config")
+    .update({
+      event_fee_pkr: d.eventFeePkr,
+      cert_rate_pkr: d.certRatePkr,
+      rounding_pkr: d.roundingPkr,
+      min_events: d.minEvents,
+      max_events: d.maxEvents,
+      min_certs_per_event: d.minCertsPerEvent,
+      max_certs_per_event: d.maxCertsPerEvent,
+      certs_step: d.certsStep,
+      volume_discounts: d.volumeDiscounts,
+      duration_multipliers: d.durationMultipliers,
+      allowed_months: allowedMonths,
+      updated_by: superAdmin.id,
+    })
+    .eq("id", true);
+
+  if (updErr) {
+    return {
+      error: sanitizeClientErrorMessage(
+        updErr,
+        "Failed to update pricing_config.",
+      ),
+    };
+  }
+
+  // Record audit log entry on superadmin's organization if they belong to one
+  const { data: memRow } = await admin
+    .from("organization_members")
+    .select("org_id")
+    .eq("user_id", superAdmin.id)
+    .limit(1)
+    .maybeSingle();
+
+  if (memRow?.org_id) {
+    await admin.from("audit_log").insert({
+      org_id: memRow.org_id,
+      user_id: superAdmin.id,
+      action: "superadmin.pricing_config_updated",
+      details: {
+        event_fee_pkr: d.eventFeePkr,
+        cert_rate_pkr: d.certRatePkr,
+        rounding_pkr: d.roundingPkr,
+        superadmin_email: superAdmin.email,
+      },
+    });
+  }
+
+  revalidatePath("/");
+  revalidatePath("/dashboard/billing");
+  revalidatePath("/superadmin", "layout");
+  return { success: true };
+}
+
+/**
+ * Legacy payment_requests review compatibility action.
  */
 export async function superAdminReviewPaymentAction(input: {
   requestId: string;
@@ -333,47 +606,19 @@ export async function superAdminReviewPaymentAction(input: {
     return { error: formatZodError(parsed.error) };
   }
 
-  const billingDays = parsed.data.billingDays ?? 30;
   const admin = getSupabaseAdmin();
-
-  const { data: rpcRows, error } = await admin.rpc("review_payment_request", {
+  const { error } = await admin.rpc("review_payment_request", {
     p_request_id: parsed.data.requestId,
     p_decision: parsed.data.decision,
     p_reviewer: superAdmin.email,
     p_note: parsed.data.reviewerNote || null,
-    p_billing_days: billingDays,
+    p_billing_days: parsed.data.billingDays ?? 30,
   });
 
   if (error) {
     return {
-      error: sanitizeClientErrorMessage(
-        error,
-        "Failed to process payment review.",
-      ),
+      error: sanitizeClientErrorMessage(error, "Failed to review payment request."),
     };
-  }
-
-  const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
-    | { org_id?: string; plan_id?: string; plan_expires_at?: string }
-    | undefined;
-
-  if (row?.org_id) {
-    await admin.from("audit_log").insert({
-      org_id: row.org_id,
-      user_id: superAdmin.id,
-      action:
-        input.decision === "approved"
-          ? "superadmin.payment_approved"
-          : "superadmin.payment_rejected",
-      details: {
-        payment_request_id: input.requestId,
-        plan_id: row.plan_id ?? null,
-        billing_days: billingDays,
-        plan_expires_at: row.plan_expires_at ?? null,
-        reviewer_note: input.reviewerNote?.trim() || null,
-        superadmin_email: superAdmin.email,
-      },
-    });
   }
 
   revalidatePath("/superadmin", "layout");

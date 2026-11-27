@@ -2,15 +2,51 @@ import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrgResult, getCurrentUser } from "@/lib/auth";
+import { UuidSchema } from "@/lib/schemas";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 
+async function findReceiptRowById(requestId: string): Promise<{
+  id: string;
+  org_id: string;
+  screenshot_path: string | null;
+} | null> {
+  const admin = getSupabaseAdmin();
+
+  const [purchaseRes, topupRes, legacyRes] = await Promise.all([
+    admin
+      .from("purchases")
+      .select("id, org_id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+    admin
+      .from("certificate_topups")
+      .select("id, org_id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+    admin
+      .from("payment_requests")
+      .select("id, org_id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+  ]);
+
+  const row = purchaseRes.data ?? topupRes.data ?? legacyRes.data;
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    org_id: String(row.org_id),
+    screenshot_path:
+      typeof row.screenshot_path === "string" ? row.screenshot_path : null,
+  };
+}
+
 /**
  * GET /api/dashboard/billing/payment-requests/[requestId]/screenshot
- * Streams the payment receipt image/PDF from the private `payment-proofs` bucket.
- * Strictly restricted to members of the owning active organization OR users in `public.super_admins`.
+ * Streams payment proof receipts for `purchases`, `certificate_topups`, or
+ * legacy `payment_requests` strictly scoped to owning org members or `super_admins`.
  */
 export async function GET(
   _req: NextRequest,
@@ -21,23 +57,18 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const [{ org }, isSuperAdmin] = await Promise.all([
+  const [{ org }, isSuperAdmin, { requestId: rawId }] = await Promise.all([
     getCurrentOrgResult(),
     isUserInSuperAdminsTable(user.id),
+    context.params,
   ]);
 
-  const { requestId } = await context.params;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+  const parsedId = UuidSchema.safeParse(rawId);
+  if (!parsedId.success) {
     return NextResponse.json({ error: "Invalid request ID." }, { status: 400 });
   }
 
-  const admin = getSupabaseAdmin();
-  const { data: reqRow } = await admin
-    .from("payment_requests")
-    .select("id, org_id, screenshot_path")
-    .eq("id", requestId)
-    .maybeSingle();
-
+  const reqRow = await findReceiptRowById(parsedId.data);
   if (!reqRow || !reqRow.screenshot_path) {
     return NextResponse.json({ error: "Screenshot not found." }, { status: 404 });
   }
@@ -50,6 +81,7 @@ export async function GET(
   }
 
   const path = String(reqRow.screenshot_path);
+  const admin = getSupabaseAdmin();
   const { data: blob, error } = await admin.storage
     .from("payment-proofs")
     .download(path);
@@ -76,7 +108,7 @@ export async function GET(
     status: 200,
     headers: {
       "Content-Type": contentType,
-      "Content-Disposition": `inline; filename="payment-proof-${requestId.slice(0, 8)}.${ext}"`,
+      "Content-Disposition": `inline; filename="payment-proof-${parsedId.data.slice(0, 8)}.${ext}"`,
       "Cache-Control": "private, no-store",
     },
   });

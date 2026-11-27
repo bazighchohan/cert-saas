@@ -1,7 +1,15 @@
+import type { PackageKind } from "@/lib/pricing";
+
 export type PlanErrorCode =
   | "PLAN_LIMIT_REACHED"
-  | "PLAN_EXPIRED"
-  | "ORG_SUSPENDED";
+  | "PURCHASE_EXPIRED"
+  | "PURCHASE_PENDING"
+  | "NO_ACTIVE_PURCHASE"
+  | "NO_EVENT_SLOTS"
+  | "ORG_SUSPENDED"
+  | "NOT_FOUND"
+  // Legacy alias kept for union compatibility in UI handlers
+  | "PLAN_EXPIRED";
 
 export class PlanEnforcementError extends Error {
   readonly code: PlanErrorCode;
@@ -21,141 +29,128 @@ export function isPlanEnforcementError(
   return err instanceof PlanEnforcementError;
 }
 
-export type PlanResourceInput =
+export type PurchaseStatus = "pending" | "active" | "rejected" | "expired";
+
+export interface PurchaseSummarySnapshot {
+  id: string;
+  orgId: string;
+  planId: string | null;
+  kind: PackageKind;
+  eventsTotal: number;
+  eventsUsed: number;
+  certsPerEvent: number;
+  months: number;
+  status: PurchaseStatus;
+  isPilot: boolean;
+  startsAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface EventEnforcementSnapshot {
+  id: string;
+  orgId: string;
+  purchaseId: string | null;
+  maxCertificates: number;
+  attendeesUsed: number;
+  certificatesUsed: number;
+  certificateTypesUsed?: number;
+  maxCertificateTypes?: number | null;
+}
+
+export interface OrgPurchaseEnforcementState {
+  orgId: string;
+  orgStatus: "active" | "suspended";
+  purchases: PurchaseSummarySnapshot[];
+  event?: EventEnforcementSnapshot | null;
+}
+
+export type PlanActionInput =
+  | "create_event"
+  | "release_event"
   | "write"
-  | "event"
-  | { kind: "write" }
-  | { kind: "event"; add?: number }
-  | { kind: "certificate_type"; eventId: string; add?: number }
+  | { kind: "certificate_type"; add?: number }
   | {
       kind: "attendee" | "certificate" | "import";
-      eventId: string;
       addAttendees?: number;
       addCertificates?: number;
     };
 
-export interface NormalizedPlanResource {
-  kind: "write" | "event" | "certificate_type" | "attendee" | "certificate" | "import";
-  eventId?: string;
-  addCount: number;
-  addAttendees: number;
-  addCertificates: number;
-}
-
-export interface PlanQuotaLimits {
-  id: string;
-  name: string;
-  maxEvents: number | null;
-  maxCertificatesPerEvent: number | null;
-  maxCertificatesTotal: number | null;
-  maxCertificateTypesPerEvent: number | null;
-}
-
-export interface OrgPlanStateSnapshot {
-  orgStatus: "active" | "suspended";
-  planExpiresAt: string | null;
-  plan: PlanQuotaLimits;
-  eventsUsed?: number;
-  eventTypesUsed?: number;
-  eventAttendeesUsed?: number;
-  eventCertificatesUsed?: number;
-  totalCertificatesUsed?: number;
-}
-
-export function normalizePlanResource(
-  resource: PlanResourceInput,
-): NormalizedPlanResource {
-  if (resource === "write") {
-    return {
-      kind: "write",
-      addCount: 0,
-      addAttendees: 0,
-      addCertificates: 0,
-    };
-  }
-  if (resource === "event") {
-    return {
-      kind: "event",
-      addCount: 1,
-      addAttendees: 0,
-      addCertificates: 0,
-    };
-  }
-  if (resource.kind === "write") {
-    return {
-      kind: "write",
-      addCount: 0,
-      addAttendees: 0,
-      addCertificates: 0,
-    };
-  }
-  if (resource.kind === "event") {
-    return {
-      kind: "event",
-      addCount: Math.max(0, resource.add ?? 1),
-      addAttendees: 0,
-      addCertificates: 0,
-    };
-  }
-  if (resource.kind === "certificate_type") {
-    return {
-      kind: "certificate_type",
-      eventId: resource.eventId,
-      addCount: Math.max(0, resource.add ?? 1),
-      addAttendees: 0,
-      addCertificates: 0,
-    };
-  }
-
-  return {
-    kind: resource.kind,
-    eventId: resource.eventId,
-    addCount: 0,
-    addAttendees: Math.max(0, resource.addAttendees ?? 0),
-    addCertificates: Math.max(0, resource.addCertificates ?? 0),
-  };
+export interface PlanAllowanceResult {
+  purchase: PurchaseSummarySnapshot;
+  maxCertificates: number;
 }
 
 /**
- * Returns true if `planExpiresAt` is non-null and <= reference timestamp.
+ * Returns true if `expiresAt` is non-null and <= reference timestamp.
  */
 export function isPlanExpired(
-  planExpiresAt: string | null | undefined,
+  expiresAt: string | null | undefined,
   nowMs = Date.now(),
 ): boolean {
-  if (!planExpiresAt) return false;
-  const ts = Date.parse(planExpiresAt);
+  if (!expiresAt) return false;
+  const ts = Date.parse(expiresAt);
   if (Number.isNaN(ts)) return false;
   return ts <= nowMs;
 }
 
 /**
- * Returns true if `planExpiresAt` is in the future and within `withinDays` days.
+ * Returns true if `expiresAt` is in the future and within `withinDays` days.
  */
 export function isPlanExpiringWithinDays(
-  planExpiresAt: string | null | undefined,
-  withinDays = 7,
+  expiresAt: string | null | undefined,
+  withinDays = 14,
   nowMs = Date.now(),
 ): boolean {
-  if (!planExpiresAt) return false;
-  const ts = Date.parse(planExpiresAt);
+  if (!expiresAt) return false;
+  const ts = Date.parse(expiresAt);
   if (Number.isNaN(ts)) return false;
   return ts > nowMs && ts <= nowMs + withinDays * 86_400_000;
 }
 
 /**
- * Pure, deterministic evaluation of organization status, plan expiration (read-only mode),
- * and resource quotas. Throws `PlanEnforcementError` when blocked.
+ * Sorts active, unexpired purchases so slot consumption always prefers the
+ * purchase that expires soonest (tie-broken by `createdAt` ascending).
  */
-export function evaluatePlanEnforcement(
-  snapshot: OrgPlanStateSnapshot,
-  rawResource: PlanResourceInput,
+export function sortActiveUnexpiredPurchases(
+  purchases: PurchaseSummarySnapshot[],
+  orgId: string,
   nowMs = Date.now(),
-): void {
-  const resource = normalizePlanResource(rawResource);
-  const { orgStatus, planExpiresAt, plan } = snapshot;
+): PurchaseSummarySnapshot[] {
+  return purchases
+    .filter(
+      (p) =>
+        p.orgId === orgId &&
+        p.status === "active" &&
+        !isPlanExpired(p.expiresAt, nowMs),
+    )
+    .sort((a, b) => {
+      const aExp = a.expiresAt ? Date.parse(a.expiresAt) : Number.MAX_SAFE_INTEGER;
+      const bExp = b.expiresAt ? Date.parse(b.expiresAt) : Number.MAX_SAFE_INTEGER;
+      if (aExp !== bExp) return aExp - bExp;
+      return Date.parse(a.createdAt) - Date.parse(b.createdAt);
+    });
+}
 
-  // 1. Suspended organization check
+/**
+ * Pure, deterministic evaluator for `assertWithinPlan(orgId, eventId, action)`:
+ * 1. Blocks suspended organizations (`ORG_SUSPENDED`).
+ * 2. Enforces package purchases (no Free plan):
+ *    - `"waiting for approval"` (`PURCHASE_PENDING`) if a purchase is pending
+ *    - `"buy a package"` (`NO_ACTIVE_PURCHASE`) if none is active
+ *    - `"no event slots left"` (`NO_EVENT_SLOTS`) if all active slots are used
+ *    - Read-only expiry (`PURCHASE_EXPIRED`) when a purchase expires
+ * 3. Enforces the event's own `max_certificates` on manual add, CSV import,
+ *    and certificate-type assignment (`PLAN_LIMIT_REACHED`).
+ */
+export function evaluatePurchasePlanEnforcement(
+  state: OrgPurchaseEnforcementState,
+  eventId: string | null,
+  action: PlanActionInput,
+  nowMs = Date.now(),
+): PlanAllowanceResult {
+  const { orgId, orgStatus, purchases } = state;
+
   if (orgStatus !== "active") {
     throw new PlanEnforcementError(
       "ORG_SUSPENDED",
@@ -164,123 +159,200 @@ export function evaluatePlanEnforcement(
     );
   }
 
-  // 2. Expired plan -> Read-Only Mode check
-  //    Admins can view and export data, and public downloads keep working,
-  //    but creating or mutating resources in the dashboard is blocked.
-  if (isPlanExpired(planExpiresAt, nowMs)) {
-    const formattedDate = new Date(planExpiresAt!).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      timeZone: "UTC",
-    });
+  const orgPurchases = purchases.filter((p) => p.orgId === orgId);
+  const activeUnexpired = sortActiveUnexpiredPurchases(
+    orgPurchases,
+    orgId,
+    nowMs,
+  );
+  const availableSlotPurchases = activeUnexpired.filter(
+    (p) => p.eventsUsed < p.eventsTotal,
+  );
+  const pendingPurchases = orgPurchases.filter((p) => p.status === "pending");
+  const expiredPurchases = orgPurchases.filter(
+    (p) =>
+      p.status === "expired" ||
+      (p.status === "active" && isPlanExpired(p.expiresAt, nowMs)),
+  );
+
+  // 1. Event creation check (eventId is null)
+  if (action === "create_event") {
+    if (availableSlotPurchases.length > 0) {
+      const chosen = availableSlotPurchases[0];
+      return {
+        purchase: chosen,
+        maxCertificates: chosen.certsPerEvent,
+      };
+    }
+
+    if (pendingPurchases.length > 0) {
+      throw new PlanEnforcementError(
+        "PURCHASE_PENDING",
+        "Your package purchase is waiting for approval. You will be able to create events as soon as it is approved.",
+        402,
+      );
+    }
+
+    if (activeUnexpired.length > 0) {
+      const usedTotal = activeUnexpired.reduce((s, p) => s + p.eventsUsed, 0);
+      const slotsTotal = activeUnexpired.reduce((s, p) => s + p.eventsTotal, 0);
+      throw new PlanEnforcementError(
+        "NO_EVENT_SLOTS",
+        `No event slots left in your active package(s) (${usedTotal} / ${slotsTotal} events used). Buy another package in Billing to create more events.`,
+        402,
+      );
+    }
+
+    if (expiredPurchases.length > 0) {
+      throw new PlanEnforcementError(
+        "PURCHASE_EXPIRED",
+        "Your package has expired — please buy a package in Billing to create new events. Read access and exports remain available.",
+        402,
+      );
+    }
+
     throw new PlanEnforcementError(
-      "PLAN_EXPIRED",
-      `Your ${plan.name} plan expired on ${formattedDate}. Your organization is in read-only mode (viewing and exports remain available, and public certificate downloads stay live). Renew or upgrade in Billing to create or edit resources.`,
+      "NO_ACTIVE_PURCHASE",
+      "Please buy a package in Billing before creating an event.",
       402,
     );
   }
 
-  // 3. Resource-specific plan limit checks
-  if (resource.kind === "write") {
-    return;
+  // 2. General org write check without a specific event
+  if (action === "write" && !eventId) {
+    if (activeUnexpired.length > 0) {
+      return {
+        purchase: activeUnexpired[0],
+        maxCertificates: activeUnexpired[0].certsPerEvent,
+      };
+    }
+    if (pendingPurchases.length > 0) {
+      throw new PlanEnforcementError(
+        "PURCHASE_PENDING",
+        "Your package purchase is waiting for approval.",
+        402,
+      );
+    }
+    if (expiredPurchases.length > 0) {
+      throw new PlanEnforcementError(
+        "PURCHASE_EXPIRED",
+        "Your package has expired. Your organization keeps read access and exports; buy a package in Billing to make changes.",
+        402,
+      );
+    }
+    throw new PlanEnforcementError(
+      "NO_ACTIVE_PURCHASE",
+      "Please buy a package in Billing to create or edit events.",
+      402,
+    );
   }
 
-  if (resource.kind === "event") {
-    const used = snapshot.eventsUsed ?? 0;
-    if (
-      resource.addCount > 0 &&
-      plan.maxEvents !== null &&
-      used + resource.addCount > plan.maxEvents
-    ) {
-      throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Your organization has reached the ${plan.name} plan limit of ${plan.maxEvents} event${
-          plan.maxEvents === 1 ? "" : "s"
-        } (${used}/${plan.maxEvents} used). Request an upgrade in Billing to create more events.`,
-        402,
-      );
-    }
-    return;
+  // 3. Event-scoped checks: release_event, write (with eventId), certificate_type, attendee/certificate/import
+  const ev = state.event;
+  if (!eventId || !ev || ev.id !== eventId || ev.orgId !== orgId) {
+    throw new PlanEnforcementError(
+      "NOT_FOUND",
+      "Event not found for your organization.",
+      404,
+    );
   }
 
-  if (resource.kind === "certificate_type") {
-    const used = snapshot.eventTypesUsed ?? 0;
-    if (
-      resource.addCount > 0 &&
-      plan.maxCertificateTypesPerEvent !== null &&
-      used + resource.addCount > plan.maxCertificateTypesPerEvent
-    ) {
+  const backingPurchase = ev.purchaseId
+    ? orgPurchases.find((p) => p.id === ev.purchaseId)
+    : undefined;
+
+  if (!backingPurchase) {
+    if (pendingPurchases.length > 0) {
       throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Your ${plan.name} plan allows up to ${plan.maxCertificateTypesPerEvent} certificate type${
-          plan.maxCertificateTypesPerEvent === 1 ? "" : "s"
-        } per event (${used}/${plan.maxCertificateTypesPerEvent} used). Request an upgrade in Billing to add more certificate types.`,
+        "PURCHASE_PENDING",
+        "Your package purchase is waiting for approval. Every organization needs an approved purchase before creating or releasing events.",
         402,
       );
     }
-    return;
+    throw new PlanEnforcementError(
+      "NO_ACTIVE_PURCHASE",
+      "Please buy a package in Billing — every event requires an approved package.",
+      402,
+    );
   }
 
-  // attendee | certificate | import
-  const eventAttendeesUsed = snapshot.eventAttendeesUsed ?? 0;
-  const eventCertsUsed = snapshot.eventCertificatesUsed ?? 0;
-  const totalCertsUsed = snapshot.totalCertificatesUsed ?? 0;
-
-  if (resource.addCertificates > 0) {
-    if (
-      plan.maxCertificatesPerEvent !== null &&
-      eventCertsUsed + resource.addCertificates > plan.maxCertificatesPerEvent
-    ) {
-      throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Plan limit reached: issuing ${resource.addCertificates} more certificate${
-          resource.addCertificates === 1 ? "" : "s"
-        } would exceed the ${plan.name} plan limit of ${plan.maxCertificatesPerEvent} certificates per event (${eventCertsUsed}/${plan.maxCertificatesPerEvent} used). Upgrade your plan in Billing.`,
-        402,
-      );
-    }
-
-    if (
-      plan.maxCertificatesTotal !== null &&
-      totalCertsUsed + resource.addCertificates > plan.maxCertificatesTotal
-    ) {
-      throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Plan limit reached: issuing ${resource.addCertificates} more certificate${
-          resource.addCertificates === 1 ? "" : "s"
-        } would exceed the ${plan.name} plan total limit of ${plan.maxCertificatesTotal} certificates across all events (${totalCertsUsed}/${plan.maxCertificatesTotal} used). Upgrade your plan in Billing.`,
-        402,
-      );
-    }
+  if (backingPurchase.status === "pending") {
+    throw new PlanEnforcementError(
+      "PURCHASE_PENDING",
+      "Your package purchase is waiting for approval.",
+      402,
+    );
   }
 
-  if (resource.addAttendees > 0) {
-    if (
-      plan.maxCertificatesPerEvent !== null &&
-      eventAttendeesUsed + resource.addAttendees > plan.maxCertificatesPerEvent
-    ) {
-      throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Plan limit reached: adding ${resource.addAttendees} attendee${
-          resource.addAttendees === 1 ? "" : "s"
-        } would exceed the ${plan.name} plan limit of ${plan.maxCertificatesPerEvent} attendees per event (${eventAttendeesUsed}/${plan.maxCertificatesPerEvent} used). Upgrade your plan in Billing.`,
-        402,
-      );
-    }
-
-    if (
-      resource.addCertificates === 0 &&
-      plan.maxCertificatesTotal !== null &&
-      totalCertsUsed + resource.addAttendees > plan.maxCertificatesTotal
-    ) {
-      throw new PlanEnforcementError(
-        "PLAN_LIMIT_REACHED",
-        `Plan limit reached: your organization has already used ${totalCertsUsed}/${plan.maxCertificatesTotal} total certificates on the ${plan.name} plan. Upgrade your plan in Billing.`,
-        402,
-      );
-    }
+  if (backingPurchase.status === "rejected") {
+    throw new PlanEnforcementError(
+      "NO_ACTIVE_PURCHASE",
+      "No approved package is active for this event. Please buy a package in Billing.",
+      402,
+    );
   }
+
+  if (
+    backingPurchase.status === "expired" ||
+    isPlanExpired(backingPurchase.expiresAt, nowMs)
+  ) {
+    throw new PlanEnforcementError(
+      "PURCHASE_EXPIRED",
+      "The package for this event has expired. Your organization keeps read access and exports, while released public certificate downloads remain active until the retention date.",
+      402,
+    );
+  }
+
+  if (action === "release_event" || action === "write") {
+    return {
+      purchase: backingPurchase,
+      maxCertificates: ev.maxCertificates,
+    };
+  }
+
+  if (action.kind === "certificate_type") {
+    const addCount = Math.max(0, action.add ?? 1);
+    const maxTypes =
+      ev.maxCertificateTypes === undefined ? 20 : ev.maxCertificateTypes;
+    const usedTypes = ev.certificateTypesUsed ?? 0;
+    if (addCount > 0 && maxTypes !== null && usedTypes + addCount > maxTypes) {
+      throw new PlanEnforcementError(
+        "PLAN_LIMIT_REACHED",
+        `This event already has ${usedTypes} / ${maxTypes} certificate types.`,
+        402,
+      );
+    }
+    return {
+      purchase: backingPurchase,
+      maxCertificates: ev.maxCertificates,
+    };
+  }
+
+  // attendee | certificate | import -> enforce event.maxCertificates
+  const maxCerts = ev.maxCertificates;
+  const addAttendees = Math.max(0, action.addAttendees ?? 0);
+  const addCertificates = Math.max(0, action.addCertificates ?? 0);
+
+  if (addCertificates > 0 && ev.certificatesUsed + addCertificates > maxCerts) {
+    throw new PlanEnforcementError(
+      "PLAN_LIMIT_REACHED",
+      `Certificate limit reached for this event (${ev.certificatesUsed} / ${maxCerts} certificates used; tried to add ${addCertificates}). Top up certificates in Billing to raise this event's limit.`,
+      402,
+    );
+  }
+
+  if (addAttendees > 0 && ev.attendeesUsed + addAttendees > maxCerts) {
+    throw new PlanEnforcementError(
+      "PLAN_LIMIT_REACHED",
+      `Certificate limit reached for this event (${ev.attendeesUsed} / ${maxCerts} attendees used; tried to add ${addAttendees}). Top up certificates in Billing to raise this event's limit.`,
+      402,
+    );
+  }
+
+  return {
+    purchase: backingPurchase,
+    maxCertificates: maxCerts,
+  };
 }
 
 export const MAX_PAYMENT_PROOF_BYTES = 5 * 1024 * 1024; // 5 MB

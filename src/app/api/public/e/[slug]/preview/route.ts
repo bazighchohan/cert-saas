@@ -4,7 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { generateCertificate } from "@/lib/certificates";
 import { fetchTemplateBytesFromStorage } from "@/lib/certificates/storage";
 import {
-  getPublicEventBySlug,
+  getPublicEventPageState,
   verifyPublicLookupToken,
 } from "@/lib/public-event";
 import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
@@ -72,7 +72,14 @@ export async function GET(
     );
   }
 
-  const event = await getPublicEventBySlug(slug);
+  const pageState = await getPublicEventPageState(slug);
+  if (pageState.state === "expired") {
+    return NextResponse.json(
+      { error: "This event has expired.", code: "EVENT_EXPIRED" },
+      { status: 410, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const event = pageState.state === "ok" ? pageState.event : null;
   if (!event || !event.released || event.id !== payload.eventId || event.orgId !== payload.orgId) {
     return NextResponse.json(
       { error: "Certificates are not available." },

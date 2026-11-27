@@ -125,6 +125,15 @@ export async function POST(
       { status: 403, headers: { "Cache-Control": "no-store" } },
     );
   }
+  if (pageState.state === "expired") {
+    return NextResponse.json(
+      {
+        error: "This event has expired.",
+        code: "EVENT_EXPIRED",
+      },
+      { status: 410, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const { event } = pageState;
 
   if (!event.released) {

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
+import { UuidSchema } from "@/lib/schemas";
 import { getCurrentSuperAdmin } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
@@ -9,8 +10,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/superadmin/payment-requests/[requestId]/screenshot
- * Streams payment proof screenshots exclusively to authenticated users listed
- * in `public.super_admins`.
+ * Streams payment proof screenshots for `purchases`, `certificate_topups`, or
+ * `payment_requests` exclusively to authenticated users in `public.super_admins`.
  */
 export async function GET(
   _req: NextRequest,
@@ -24,18 +25,33 @@ export async function GET(
     );
   }
 
-  const { requestId } = await context.params;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+  const { requestId: rawId } = await context.params;
+  const parsedId = UuidSchema.safeParse(rawId);
+  if (!parsedId.success) {
     return NextResponse.json({ error: "Invalid request ID." }, { status: 400 });
   }
+  const requestId = parsedId.data;
 
   const admin = getSupabaseAdmin();
-  const { data: reqRow } = await admin
-    .from("payment_requests")
-    .select("id, screenshot_path")
-    .eq("id", requestId)
-    .maybeSingle();
+  const [purchaseRes, topupRes, legacyRes] = await Promise.all([
+    admin
+      .from("purchases")
+      .select("id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+    admin
+      .from("certificate_topups")
+      .select("id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+    admin
+      .from("payment_requests")
+      .select("id, screenshot_path")
+      .eq("id", requestId)
+      .maybeSingle(),
+  ]);
 
+  const reqRow = purchaseRes.data ?? topupRes.data ?? legacyRes.data;
   if (!reqRow || !reqRow.screenshot_path) {
     return NextResponse.json({ error: "Screenshot not found." }, { status: 404 });
   }

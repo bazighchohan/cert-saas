@@ -25,10 +25,14 @@ export interface CurrentOrg {
   id: string;
   name: string;
   slug: string;
-  planId: string;
+  planId: string | null;
+  packageLabel: string;
   status: OrgStatus;
   planExpiresAt: string | null;
   planExpiringSoon: boolean;
+  hasActivePurchase: boolean;
+  hasPendingPurchase: boolean;
+  hasExpiredPurchaseOnly: boolean;
   isReadOnly: boolean;
   role: OrgRole;
   userId: string;
@@ -39,7 +43,7 @@ interface ProvisionRpcRow {
   org_id: string;
   org_name: string;
   org_slug: string;
-  plan_id: string;
+  plan_id: string | null;
   role: OrgRole;
 }
 
@@ -128,8 +132,8 @@ export function slugifyOrganizationName(name: string, userIdFallback = ""): stri
 }
 
 /**
- * Queries the user's existing organization membership using the service-role client
- * (reliable even before session cookies finish propagating during signup/callback).
+ * Queries the user's existing organization membership + package purchases using
+ * the service-role client.
  */
 async function findExistingOrgForUser(
   userId: string,
@@ -154,23 +158,88 @@ async function findExistingOrgForUser(
 
   if (!org) return null;
 
+  const orgId = org.id as string;
   const status = ((org.status as OrgStatus) ?? "active") as OrgStatus;
-  const planExpiresAt =
-    typeof org.plan_expires_at === "string" ? org.plan_expires_at : null;
-  const expired = isPlanExpired(planExpiresAt);
+
+  const { data: purchaseRows } = await admin
+    .from("purchases")
+    .select("id, kind, is_pilot, status, expires_at")
+    .eq("org_id", orgId)
+    .order("expires_at", { ascending: true });
+
+  const nowMs = Date.now();
+  const list = (purchaseRows ?? []) as Array<Record<string, unknown>>;
+
+  const activeUnexpired = list.filter(
+    (p) =>
+      p.status === "active" &&
+      !isPlanExpired(
+        typeof p.expires_at === "string" ? p.expires_at : null,
+        nowMs,
+      ),
+  );
+  const pendingList = list.filter((p) => p.status === "pending");
+  const expiredList = list.filter(
+    (p) =>
+      p.status === "expired" ||
+      (p.status === "active" &&
+        isPlanExpired(
+          typeof p.expires_at === "string" ? p.expires_at : null,
+          nowMs,
+        )),
+  );
+
+  const hasActivePurchase = activeUnexpired.length > 0;
+  const hasPendingPurchase = pendingList.length > 0;
+  const hasExpiredPurchaseOnly =
+    !hasActivePurchase && !hasPendingPurchase && expiredList.length > 0;
+
+  // Earliest active expiry (for warning) or latest expired date
+  let relevantExpiry: string | null = null;
+  if (activeUnexpired.length > 0) {
+    const firstExp = activeUnexpired.find(
+      (p) => typeof p.expires_at === "string",
+    );
+    relevantExpiry = firstExp ? (firstExp.expires_at as string) : null;
+  } else if (expiredList.length > 0) {
+    const lastExp = expiredList[expiredList.length - 1];
+    relevantExpiry =
+      typeof lastExp?.expires_at === "string" ? lastExp.expires_at : null;
+  }
+
   const expiringSoon =
-    !expired &&
-    (Boolean(org.plan_expiring_soon) || isPlanExpiringWithinDays(planExpiresAt, 7));
+    hasActivePurchase && isPlanExpiringWithinDays(relevantExpiry, 14, nowMs);
+
+  let packageLabel = "No Package";
+  if (hasActivePurchase) {
+    if (activeUnexpired.length > 1) {
+      packageLabel = `${activeUnexpired.length} Packages`;
+    } else {
+      const p0 = activeUnexpired[0];
+      packageLabel = p0.is_pilot
+        ? "Pilot"
+        : String(p0.kind ?? "Active").toUpperCase();
+    }
+  } else if (hasPendingPurchase) {
+    packageLabel = "Pending Approval";
+  } else if (hasExpiredPurchaseOnly) {
+    packageLabel = "Expired";
+  }
 
   return {
-    id: org.id as string,
+    id: orgId,
     name: org.name as string,
     slug: org.slug as string,
-    planId: org.plan_id as string,
+    planId: typeof org.plan_id === "string" ? org.plan_id : null,
+    packageLabel,
     status,
-    planExpiresAt,
+    planExpiresAt: relevantExpiry,
     planExpiringSoon: expiringSoon,
-    isReadOnly: status !== "active" || expired,
+    hasActivePurchase,
+    hasPendingPurchase,
+    hasExpiredPurchaseOnly,
+    // Read-only banner shows when previously active purchase(s) have all expired
+    isReadOnly: status !== "active" || hasExpiredPurchaseOnly,
     role: (data.role as OrgRole) ?? "owner",
     userId,
     userEmail,
@@ -181,12 +250,9 @@ async function findExistingOrgForUser(
 const inflightProvisions = new Map<string, Promise<CurrentOrg>>();
 
 /**
- * Atomically provisions the user's organization (on the Free plan), owner membership,
+ * Atomically provisions the user's organization (with NO Free plan — every org
+ * needs an approved purchase before creating or releasing events), owner membership,
  * and audit_log entry.
- * - Resolves organization name in order: explicitName -> user_metadata.organization_name -> email prefix -> "My Organization".
- * - Idempotent: if the user already has a membership, returns the existing organization.
- * - Uses the transactional RPC `create_organization_for_user`, with an atomic fallback
- *   cleanup if an older unpatched SQL function exists in the database.
  */
 export async function provisionOrganizationForUser(
   userId: string,
@@ -200,7 +266,6 @@ export async function provisionOrganizationForUser(
   }
 
   const task = (async (): Promise<CurrentOrg> => {
-    // 1. Fast idempotency check: if the user already has a membership, do nothing.
     const alreadyMember = await findExistingOrgForUser(userId, userEmail);
     if (alreadyMember) {
       return alreadyMember;
@@ -214,7 +279,7 @@ export async function provisionOrganizationForUser(
 
     const admin = getSupabaseAdmin();
 
-    // 2. Primary path: single Postgres transaction via RPC create_organization_for_user.
+    // Primary path: single Postgres transaction via RPC create_organization_for_user.
     const { data: rpcData, error: rpcError } = await admin.rpc(
       "create_organization_for_user",
       {
@@ -232,10 +297,14 @@ export async function provisionOrganizationForUser(
           id: row.org_id,
           name: row.org_name || resolvedName,
           slug: row.org_slug,
-          planId: row.plan_id || "free",
+          planId: row.plan_id ?? null,
+          packageLabel: "No Package",
           status: "active",
           planExpiresAt: null,
           planExpiringSoon: false,
+          hasActivePurchase: false,
+          hasPendingPurchase: false,
+          hasExpiredPurchaseOnly: false,
           isReadOnly: false,
           role: row.role || "owner",
           userId,
@@ -250,19 +319,15 @@ export async function provisionOrganizationForUser(
         resolvedName,
         code: rpcError.code,
         message: rpcError.message,
-        details: rpcError.details,
-        hint: rpcError.hint,
       });
     }
 
-    // Re-check membership in case a concurrent request won the race.
     const afterRpcExisting = await findExistingOrgForUser(userId, userEmail);
     if (afterRpcExisting) {
       return afterRpcExisting;
     }
 
-    // 3. Fallback path (if the user's Supabase DB still has the unpatched 003 SQL function):
-    //    Create organization + owner membership + Free plan with rollback on partial failure.
+    // Fallback path: create organization with plan_id = null (no Free plan)
     const baseSlug = slugifyOrganizationName(resolvedName, userId);
     let createdOrgId: string | null = null;
     let createdSlug = baseSlug;
@@ -278,7 +343,7 @@ export async function provisionOrganizationForUser(
         .insert({
           name: resolvedName,
           slug: candidateSlug,
-          plan_id: "free",
+          plan_id: null,
           status: "active",
         })
         .select("id, name, slug, plan_id")
@@ -307,7 +372,6 @@ export async function provisionOrganizationForUser(
       throw new Error("Could not allocate a unique organization slug.");
     }
 
-    // Re-check if another concurrent request created a membership while we were inserting.
     const raceWinner = await findExistingOrgForUser(userId, userEmail);
     if (raceWinner) {
       await admin.from("organizations").delete().eq("id", createdOrgId);
@@ -323,11 +387,6 @@ export async function provisionOrganizationForUser(
       });
 
     if (memberErr) {
-      console.error(
-        "[auth:provisionOrganizationForUser] Membership insert failed, rolling back org:",
-        memberErr,
-      );
-      // Roll back the created organization so no half-created orphan org remains.
       await admin.from("organizations").delete().eq("id", createdOrgId);
       const concurrentOrg = await findExistingOrgForUser(userId, userEmail);
       if (concurrentOrg) return concurrentOrg;
@@ -342,7 +401,7 @@ export async function provisionOrganizationForUser(
         details: {
           name: resolvedName,
           slug: createdSlug,
-          plan_id: "free",
+          plan_id: null,
         },
       });
     } catch (auditErr) {
@@ -356,10 +415,14 @@ export async function provisionOrganizationForUser(
       id: createdOrgId,
       name: resolvedName,
       slug: createdSlug,
-      planId: "free",
+      planId: null,
+      packageLabel: "No Package",
       status: "active",
       planExpiresAt: null,
       planExpiringSoon: false,
+      hasActivePurchase: false,
+      hasPendingPurchase: false,
+      hasExpiredPurchaseOnly: false,
       isReadOnly: false,
       role: "owner",
       userId,
@@ -375,10 +438,6 @@ export async function provisionOrganizationForUser(
   }
 }
 
-/**
- * Returns the authenticated Supabase user verified against the Auth server,
- * or null if not logged in. Cached per server request.
- */
 export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   try {
     const supabase = await createSupabaseServerClient();
@@ -413,12 +472,6 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   }
 });
 
-/**
- * Resolves the current logged-in user's organization, auto-provisioning one
- * if the user has no organization membership yet.
- * Returns { org, error } so callers can render a clear error page with a retry
- * button instead of redirecting in a loop.
- */
 export const getCurrentOrgResult = cache(
   async (): Promise<{ org: CurrentOrg | null; error: string | null }> => {
     const user = await getCurrentUser();
@@ -426,7 +479,6 @@ export const getCurrentOrgResult = cache(
       return { org: null, error: "Not signed in." };
     }
 
-    // 1. Check via user's RLS session client first, then service-role check
     try {
       const existing = await findExistingOrgForUser(user.id, user.email);
       if (existing) {
@@ -439,7 +491,6 @@ export const getCurrentOrgResult = cache(
       );
     }
 
-    // 2. User has no organization membership yet -> auto-provision using the 4-step name resolution order.
     const resolvedName = resolveOrganizationName({
       explicitName: user.orgNameFromMeta,
       userMetadata: user.userMetadata,
@@ -473,12 +524,6 @@ export const getCurrentOrgResult = cache(
   },
 );
 
-/**
- * Returns the current logged-in user's ACTIVE organization, or null if
- * unauthenticated, provisioning failed, or the organization is suspended.
- * All `/api/dashboard/**` routes and dashboard Server Actions call this helper,
- * so suspending an organization blocks every dashboard API/mutation at once.
- */
 export const getCurrentOrg = cache(async (): Promise<CurrentOrg | null> => {
   const { org } = await getCurrentOrgResult();
   if (!org || org.status !== "active") {
@@ -487,10 +532,6 @@ export const getCurrentOrg = cache(async (): Promise<CurrentOrg | null> => {
   return org;
 });
 
-/**
- * Helper for /dashboard/** Server Components.
- * Redirects unauthenticated users to /login and suspended organizations to /account-suspended.
- */
 export async function requireDashboardAuth(): Promise<{
   user: CurrentUser;
   org: CurrentOrg;

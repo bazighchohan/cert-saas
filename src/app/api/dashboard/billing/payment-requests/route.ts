@@ -8,11 +8,14 @@ import {
   MAX_PAYMENT_PROOF_BYTES,
   validatePaymentProofBytes,
 } from "@/lib/plan-enforcement-helpers";
+import { computePrice } from "@/lib/pricing";
+import { getPricingAndPresets } from "@/lib/pricing-server";
 import { PaymentUpgradeFieldsSchema } from "@/lib/schemas";
 import { checkCsrfOrigin, formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 async function ensurePaymentProofsBucket() {
   const admin = getSupabaseAdmin();
@@ -33,18 +36,18 @@ async function ensurePaymentProofsBucket() {
 
 /**
  * POST /api/dashboard/billing/payment-requests
- * Creates a manual upgrade `payment_requests` row (status: 'pending') with an
- * uploaded payment screenshot stored under `payment-proofs/{org_id}/...`.
- *
- * Allowed even when the organization's current plan is expired (read-only mode),
- * since submitting an upgrade/renewal request is how an expired org renews!
+ * Compatibility endpoint that creates a `pending` row in `public.purchases`
+ * using server-recomputed pricing from `computePrice` + `pricing_config`.
  */
 export async function POST(req: NextRequest) {
   const csrf = checkCsrfOrigin(req);
   if (csrf) return csrf;
 
   const contentLength = Number(req.headers.get("content-length") ?? 0);
-  if (Number.isFinite(contentLength) && contentLength > MAX_PAYMENT_PROOF_BYTES + 256 * 1024) {
+  if (
+    Number.isFinite(contentLength) &&
+    contentLength > MAX_PAYMENT_PROOF_BYTES + 256 * 1024
+  ) {
     return NextResponse.json(
       { error: "Upload exceeds the 5 MB maximum size limit.", code: "PAYLOAD_TOO_LARGE" },
       { status: 413 },
@@ -55,15 +58,8 @@ export async function POST(req: NextRequest) {
   const org = await getCurrentOrg();
   if (!user || !org) {
     return NextResponse.json(
-      { error: "You must be signed in to request an upgrade." },
+      { error: "You must be signed in to buy a package." },
       { status: 401 },
-    );
-  }
-
-  if (org.status !== "active") {
-    return NextResponse.json(
-      { error: "Your organization is suspended. Contact support." },
-      { status: 403 },
     );
   }
 
@@ -110,33 +106,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: validatedProof.error }, { status: 400 });
   }
 
+  const { pricingConfig, presets } = await getPricingAndPresets();
+  const preset = presets.find((p) => p.id === planId);
+  if (!preset) {
+    return NextResponse.json(
+      { error: "Selected package preset is not available." },
+      { status: 400 },
+    );
+  }
+
+  const pricing = computePrice(
+    {
+      events: preset.eventsCount,
+      certsPerEvent: preset.certsPerEvent,
+      months: preset.months,
+    },
+    pricingConfig,
+  );
+
   const admin = getSupabaseAdmin();
-
-  // Look up target plan server-side so amount_pkr can never be spoofed by the client
-  const { data: planRow, error: planErr } = await admin
-    .from("plans")
-    .select("id, name, price_pkr, active")
-    .eq("id", planId)
-    .maybeSingle();
-
-  if (planErr || !planRow || !planRow.active) {
-    return NextResponse.json(
-      { error: "Selected plan is not available." },
-      { status: 400 },
-    );
-  }
-
-  const amountPkr = Number(planRow.price_pkr ?? 0);
-  if (amountPkr <= 0) {
-    return NextResponse.json(
-      { error: "Only paid plans require a payment upgrade request." },
-      { status: 400 },
-    );
-  }
-
   await ensurePaymentProofsBucket();
 
-  const objectPath = `${org.id}/${Date.now()}-${randomUUID().slice(0, 8)}.${validatedProof.extension}`;
+  const objectPath = `${org.id}/purchase-${Date.now()}-${randomUUID().slice(0, 8)}.${validatedProof.extension}`;
   const { error: uploadErr } = await admin.storage
     .from("payment-proofs")
     .upload(objectPath, fileBytes, {
@@ -145,7 +136,6 @@ export async function POST(req: NextRequest) {
     });
 
   if (uploadErr) {
-    console.error("[billing:upload] storage error:", uploadErr);
     return NextResponse.json(
       { error: "Failed to upload payment receipt screenshot. Please try again." },
       { status: 500 },
@@ -153,56 +143,43 @@ export async function POST(req: NextRequest) {
   }
 
   const { data: created, error: insertErr } = await admin
-    .from("payment_requests")
+    .from("purchases")
     .insert({
       org_id: org.id,
       requested_by: user.id,
-      plan_id: planRow.id as string,
-      amount_pkr: amountPkr,
+      plan_id: preset.id,
+      kind: preset.kind,
+      events_total: preset.eventsCount,
+      events_used: 0,
+      certs_per_event: preset.certsPerEvent,
+      months: preset.months,
+      list_price_pkr: pricing.listPricePkr,
+      discount_pkr: pricing.discountPkr,
+      final_price_pkr: pricing.finalPricePkr,
+      is_pilot: false,
       payment_method: paymentMethod,
       transaction_reference: transactionReference,
       screenshot_path: objectPath,
       status: "pending",
-      billing_days: 30,
     })
     .select("id, status, created_at")
     .maybeSingle();
 
   if (insertErr || !created) {
-    // Clean up uploaded object if DB insert failed
     try {
       await admin.storage.from("payment-proofs").remove([objectPath]);
     } catch {
       // Ignore cleanup errors
     }
-    console.error("[billing:insert] DB error:", insertErr);
     return NextResponse.json(
       {
         error: sanitizeClientErrorMessage(
           insertErr,
-          "Failed to record payment request. Please try again.",
+          "Failed to record package purchase.",
         ),
       },
       { status: 500 },
     );
-  }
-
-  try {
-    await admin.from("audit_log").insert({
-      org_id: org.id,
-      user_id: user.id,
-      action: "billing.upgrade_requested",
-      details: {
-        payment_request_id: created.id,
-        plan_id: planRow.id,
-        plan_name: planRow.name,
-        amount_pkr: amountPkr,
-        payment_method: paymentMethod,
-        transaction_reference: transactionReference,
-      },
-    });
-  } catch (err) {
-    console.error("Failed to write audit_log for upgrade_requested:", err);
   }
 
   revalidatePath("/dashboard/billing");

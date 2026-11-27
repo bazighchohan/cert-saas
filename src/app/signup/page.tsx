@@ -19,7 +19,7 @@ export default async function SignupPage() {
           </div>
           <h1 className="text-2xl font-bold text-slate-900">Create your organization</h1>
           <p className="mt-1 text-sm text-slate-600">
-            Start on the Free plan (1 event, up to 50 certificates)
+            Set up your workspace, choose an event package, and issue verified certificates
           </p>
         </header>
 

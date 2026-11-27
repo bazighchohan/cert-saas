@@ -46,8 +46,7 @@ export default function SignupForm() {
         </div>
         <h2 className="text-lg font-bold text-slate-900">Check your email</h2>
         <p className="text-sm text-slate-600">
-          We created your organization <strong className="text-slate-900">{orgName}</strong> on the{" "}
-          <strong className="text-slate-900">Free plan</strong> and sent a confirmation link to{" "}
+          We created your organization <strong className="text-slate-900">{orgName}</strong> and sent a confirmation link to{" "}
           <strong className="text-slate-900">{confirmationEmail}</strong>.
         </p>
         <p className="text-xs text-slate-500">
@@ -132,7 +131,7 @@ export default function SignupForm() {
         disabled={loading}
         className="flex w-full items-center justify-center rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-70"
       >
-        {loading ? "Creating organization..." : "Create Free Account"}
+        {loading ? "Creating organization..." : "Create Organization Account"}
       </button>
 
       <p className="text-center text-xs text-slate-600">

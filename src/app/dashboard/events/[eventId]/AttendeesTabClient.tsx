@@ -43,12 +43,14 @@ export default function AttendeesTabClient({
   uppercaseIdentifiers,
   certificateTypes,
   initialPlanName,
+  initialMaxCertificates = null,
 }: {
   eventId: string;
   identifierLabel: string;
   uppercaseIdentifiers: boolean;
   certificateTypes: CertificateTypeRow[];
   initialPlanName: string;
+  initialMaxCertificates?: number | null;
 }) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -69,7 +71,7 @@ export default function AttendeesTabClient({
   const [quota, setQuota] = useState<QuotaState>({
     planName: initialPlanName,
     eventCertsUsed: 0,
-    maxCertificatesPerEvent: null,
+    maxCertificatesPerEvent: initialMaxCertificates,
     orgCertsUsed: 0,
     maxCertificatesTotal: null,
   });
@@ -539,18 +541,16 @@ export default function AttendeesTabClient({
 
           <div className="flex flex-wrap items-center gap-2.5">
             <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600">
-              Event certs:{" "}
               <strong className="text-slate-900">
-                {quota.eventCertsUsed} / {quota.maxCertificatesPerEvent ?? "∞"}
+                {quota.eventCertsUsed} / {quota.maxCertificatesPerEvent ?? "∞"} certificates
               </strong>
             </span>
-            <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600">
-              Org total:{" "}
-              <strong className="text-slate-900">
-                {quota.orgCertsUsed} / {quota.maxCertificatesTotal ?? "∞"}
-              </strong>{" "}
-              ({quota.planName})
-            </span>
+            <Link
+              href={`/dashboard/billing?topupEventId=${eventId}`}
+              className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+            >
+              + Top up
+            </Link>
             <a
               href={`/api/dashboard/events/${eventId}/import/sample-csv`}
               download
@@ -684,20 +684,18 @@ export default function AttendeesTabClient({
         )}
       </div>
 
-      {/* Plan limit warning banner */}
+      {/* Event certificate limit warning banner */}
       {atAnyLimit && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs text-amber-900">
           <div>
-            <strong>Certificate quota reached on {quota.planName} plan:</strong>{" "}
-            {atEventLimit
-              ? `This event has issued ${quota.eventCertsUsed}/${quota.maxCertificatesPerEvent} allowed certificates.`
-              : `Your organization has issued ${quota.orgCertsUsed}/${quota.maxCertificatesTotal} total certificates.`}
+            <strong>Event certificate limit reached:</strong>{" "}
+            This event has used {quota.eventCertsUsed} / {quota.maxCertificatesPerEvent} certificates.
           </div>
           <Link
-            href="/dashboard/billing"
+            href={`/dashboard/billing?topupEventId=${eventId}`}
             className="rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-800"
           >
-            Upgrade Plan →
+            Top up certificates →
           </Link>
         </div>
       )}

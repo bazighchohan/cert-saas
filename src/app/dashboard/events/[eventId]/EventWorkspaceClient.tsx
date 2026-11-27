@@ -17,6 +17,7 @@ import {
 } from "@/app/dashboard/events/actions";
 import type { EventDetail } from "@/lib/dashboard-data";
 import { validateEventSlug } from "@/lib/event-validation";
+import { formatExpiryCountdown } from "@/lib/pricing";
 import AttendeesTabClient from "./AttendeesTabClient";
 import DownloadsTabClient from "./DownloadsTabClient";
 import TemplateTabClient from "./TemplateTabClient";
@@ -285,7 +286,24 @@ export default function EventWorkspaceClient({
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600">
+            <strong className="text-slate-900">
+              {event.certificatesIssuedCount} / {event.maxCertificates} certificates
+            </strong>
+            {event.purchaseExpiresAt && (
+              <span className="text-slate-500">
+                {" "}
+                · {formatExpiryCountdown(event.purchaseExpiresAt).label}
+              </span>
+            )}
+          </span>
+          <Link
+            href={`/dashboard/billing?topupEventId=${event.id}`}
+            className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+          >
+            + Top up certificates
+          </Link>
           <Button
             variant={released ? "secondary" : "primary"}
             size="sm"
@@ -489,7 +507,7 @@ export default function EventWorkspaceClient({
           eventId={event.id}
           initialTypes={event.certificateTypes}
           maxTypesPerEvent={event.maxCertificateTypesPerEvent}
-          planName={event.planName}
+          planName={event.packageLabel}
         />
       )}
 
@@ -500,7 +518,8 @@ export default function EventWorkspaceClient({
           identifierLabel={event.identifierLabel}
           uppercaseIdentifiers={uppercaseIdentifiers}
           certificateTypes={event.certificateTypes}
-          initialPlanName={event.planName}
+          initialPlanName={event.packageLabel}
+          initialMaxCertificates={event.maxCertificates}
         />
       )}
 

@@ -20,6 +20,9 @@ export async function generateMetadata({
   if (pageState.state === "unavailable") {
     return { title: "Event Unavailable | cert-saas" };
   }
+  if (pageState.state === "expired") {
+    return { title: "This Event Has Expired | cert-saas" };
+  }
   const { event } = pageState;
   return {
     title: `${event.title} — ${event.orgName} | E-Certificate Portal`,
@@ -59,6 +62,54 @@ export default async function PublicEventPage({
             unavailable because the issuing organization&apos;s account is
             suspended.
           </p>
+        </section>
+      </main>
+    );
+  }
+
+  if (pageState.state === "expired") {
+    return (
+      <main className="flex min-h-dvh flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 px-4 py-12 text-slate-900">
+        <section
+          role="alert"
+          className="mx-auto w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-sm ring-1 ring-slate-200"
+        >
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-2xl text-amber-600 ring-1 ring-amber-100">
+            ⌛
+          </div>
+          <p className="text-xs font-bold uppercase tracking-widest text-indigo-600">
+            {pageState.orgName}
+          </p>
+          <h1 className="mt-2 text-lg font-bold text-slate-900">
+            This event has expired
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            The public certificate download period for{" "}
+            <strong>{pageState.title}</strong> has ended.
+          </p>
+          {(pageState.contactEmail || pageState.contactPhone) && (
+            <div className="mt-5 border-t border-slate-100 pt-4 text-xs text-slate-500">
+              <p>Need assistance? Contact the organizer:</p>
+              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-3 font-semibold text-indigo-600">
+                {pageState.contactEmail && (
+                  <a
+                    href={`mailto:${pageState.contactEmail}`}
+                    className="hover:underline"
+                  >
+                    {pageState.contactEmail}
+                  </a>
+                )}
+                {pageState.contactPhone && (
+                  <a
+                    href={`tel:${pageState.contactPhone}`}
+                    className="hover:underline"
+                  >
+                    {pageState.contactPhone}
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       </main>
     );

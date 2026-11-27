@@ -5,7 +5,19 @@ import BillingClient from "./BillingClient";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardBillingPage() {
-  const data = await getBillingDashboardData();
-  return <BillingClient data={data} />;
+export default async function DashboardBillingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ topupEventId?: string }>;
+}) {
+  const [data, params] = await Promise.all([
+    getBillingDashboardData(),
+    searchParams,
+  ]);
+  return (
+    <BillingClient
+      data={data}
+      initialTopupEventId={params.topupEventId ?? null}
+    />
+  );
 }

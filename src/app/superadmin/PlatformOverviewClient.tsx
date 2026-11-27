@@ -1,6 +1,8 @@
 "use client";
 
+import { useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Bar,
   BarChart,
@@ -10,7 +12,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { Button, Input, useToast } from "@/components/ui";
 import type { PlatformOverviewData } from "@/lib/superadmin-data";
+import { superAdminUpdatePricingConfigAction } from "./actions";
 
 function formatDateTime(iso: string): string {
   if (!iso) return "—";
@@ -30,6 +34,55 @@ export default function PlatformOverviewClient({
 }: {
   data: PlatformOverviewData;
 }) {
+  const router = useRouter();
+  const { showToast } = useToast();
+
+  // Live pricing_config editor state
+  const [eventFeePkr, setEventFeePkr] = useState(
+    String(data.pricingConfig.eventFeePkr),
+  );
+  const [certRatePkr, setCertRatePkr] = useState(
+    String(data.pricingConfig.certRatePkr),
+  );
+  const [roundingPkr, setRoundingPkr] = useState(
+    String(data.pricingConfig.roundingPkr),
+  );
+  const [savingPricing, setSavingPricing] = useState(false);
+
+  async function handleSavePricingConfig(e: FormEvent) {
+    e.preventDefault();
+    setSavingPricing(true);
+    try {
+      const res = await superAdminUpdatePricingConfigAction({
+        eventFeePkr: Number(eventFeePkr),
+        certRatePkr: Number(certRatePkr),
+        roundingPkr: Number(roundingPkr),
+        minEvents: data.pricingConfig.minEvents,
+        maxEvents: data.pricingConfig.maxEvents,
+        minCertsPerEvent: data.pricingConfig.minCertsPerEvent,
+        maxCertsPerEvent: data.pricingConfig.maxCertsPerEvent,
+        certsStep: data.pricingConfig.certsStep,
+        volumeDiscounts: data.pricingConfig.volumeDiscounts,
+        durationMultipliers: data.pricingConfig.durationMultipliers,
+      });
+
+      if (res.error) {
+        showToast(res.error, "error");
+        return;
+      }
+
+      showToast(
+        "Updated pricing_config — all landing, billing, and server prices updated immediately!",
+        "success",
+      );
+      router.refresh();
+    } catch {
+      showToast("Failed to update pricing_config.", "error");
+    } finally {
+      setSavingPricing(false);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -38,8 +91,8 @@ export default function PlatformOverviewClient({
             Platform Overview
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Global metrics across all organizations, events, certificates,
-            downloads, and manual billing revenue.
+            Global metrics across organizations, package purchases, top-ups,
+            upcoming expirations, and live pricing rules.
           </p>
         </div>
 
@@ -54,7 +107,7 @@ export default function PlatformOverviewClient({
             href="/superadmin/payments"
             className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-indigo-700"
           >
-            Review Payment Requests ({data.pendingPaymentsCount} pending)
+            Review Purchases &amp; Top-Ups ({data.pendingPaymentsCount} pending)
           </Link>
         </div>
       </div>
@@ -110,7 +163,7 @@ export default function PlatformOverviewClient({
           </p>
         </div>
 
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-xs col-span-2 lg:col-span-1">
+        <div className="col-span-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-xs lg:col-span-1">
           <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
             Approved Revenue
           </p>
@@ -124,7 +177,120 @@ export default function PlatformOverviewClient({
         </div>
       </div>
 
-      {/* 2. Revenue per Month Chart + Breakdown Table */}
+      {/* 2. Purchases Expiring Within 14 Days (Daily Cron View — No Emails) */}
+      <section className="overflow-hidden rounded-2xl border border-amber-200 bg-white shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100 bg-amber-50/60 px-6 py-4">
+          <div>
+            <h2 className="text-base font-bold text-amber-950">
+              ⏰ Active Packages Expiring Within 14 Days (
+              {data.expiringWithin14Days.length})
+            </h2>
+            <p className="text-xs text-amber-800">
+              Updated automatically and monitored by the daily Vercel cron (
+              <code className="font-mono">/api/cron/check-expiring-plans</code>).
+            </p>
+          </div>
+        </div>
+
+        {data.expiringWithin14Days.length === 0 ? (
+          <div className="px-6 py-6 text-center text-xs text-slate-500">
+            No active packages are expiring within the next 14 days.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
+              <thead className="bg-slate-50 font-semibold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-6 py-3">Organization</th>
+                  <th className="px-6 py-3">Package</th>
+                  <th className="px-6 py-3">Slots Used</th>
+                  <th className="px-6 py-3">Expires At</th>
+                  <th className="px-6 py-3 text-right">Countdown</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
+                {data.expiringWithin14Days.map((item) => (
+                  <tr key={item.purchaseId}>
+                    <td className="px-6 py-3 font-semibold text-slate-900">
+                      <Link
+                        href={`/superadmin/organizations/${item.orgId}`}
+                        className="text-indigo-600 hover:underline"
+                      >
+                        {item.orgName}
+                      </Link>
+                    </td>
+                    <td className="px-6 py-3 uppercase font-semibold">
+                      {item.kind} {item.isPilot ? "(Pilot)" : ""} ·{" "}
+                      {item.certsPerEvent} certs/ev
+                    </td>
+                    <td className="px-6 py-3 font-mono">
+                      {item.eventsUsed} / {item.eventsTotal} events
+                    </td>
+                    <td className="px-6 py-3 text-slate-500">
+                      {formatDateTime(item.expiresAt)}
+                    </td>
+                    <td className="px-6 py-3 text-right font-bold text-amber-700">
+                      expires in {item.daysRemaining}{" "}
+                      {item.daysRemaining === 1 ? "day" : "days"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* 3. Live Pricing Engine Configuration (public.pricing_config) */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
+        <div className="mb-4">
+          <h2 className="text-base font-bold text-slate-900">
+            Pricing Engine Configuration (<code className="font-mono">pricing_config</code>)
+          </h2>
+          <p className="text-xs text-slate-500">
+            Editable by super-admins only. Saving updates every computed preset,
+            custom package, and top-up price across the app immediately without a
+            deployment.
+          </p>
+        </div>
+
+        <form
+          onSubmit={handleSavePricingConfig}
+          className="grid gap-4 sm:grid-cols-4 items-end"
+        >
+          <Input
+            label="Event Base Fee (PKR)"
+            type="number"
+            min={0}
+            value={eventFeePkr}
+            onChange={(e) => setEventFeePkr(e.target.value)}
+            required
+          />
+          <Input
+            label="Certificate Rate (PKR / cert)"
+            type="number"
+            min={0}
+            value={certRatePkr}
+            onChange={(e) => setCertRatePkr(e.target.value)}
+            required
+          />
+          <Input
+            label="Price Rounding Increment (PKR)"
+            type="number"
+            min={1}
+            value={roundingPkr}
+            onChange={(e) => setRoundingPkr(e.target.value)}
+            required
+          />
+          <div>
+            <Button type="submit" loading={savingPricing}>
+              Save Pricing Rules
+            </Button>
+          </div>
+        </form>
+      </section>
+
+      {/* 4. Revenue per Month Chart + Breakdown Table */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
         <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -132,8 +298,7 @@ export default function PlatformOverviewClient({
               Revenue per Month (PKR)
             </h2>
             <p className="text-xs text-slate-500">
-              Monthly approved <code className="font-mono">payment_requests</code>{" "}
-              across Bank Transfer, JazzCash, and Easypaisa
+              Monthly approved package purchases &amp; certificate top-ups
             </p>
           </div>
           <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
@@ -206,7 +371,7 @@ export default function PlatformOverviewClient({
         </div>
       </section>
 
-      {/* 3. Recent Platform Audit Log */}
+      {/* 5. Recent Platform Audit Log */}
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
         <div className="border-b border-slate-100 px-6 py-4">
           <h2 className="text-base font-bold text-slate-900">

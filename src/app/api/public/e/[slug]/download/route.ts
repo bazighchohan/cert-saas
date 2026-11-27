@@ -5,7 +5,7 @@ import { generateCertificate } from "@/lib/certificates";
 import { fetchTemplateBytesFromStorage } from "@/lib/certificates/storage";
 import {
   buildSafeCertificateFilename,
-  getPublicEventBySlug,
+  getPublicEventPageState,
   hashClientIp,
   verifyPublicLookupToken,
 } from "@/lib/public-event";
@@ -96,7 +96,14 @@ export async function POST(
     );
   }
 
-  const event = await getPublicEventBySlug(slug);
+  const pageState = await getPublicEventPageState(slug);
+  if (pageState.state === "expired") {
+    return NextResponse.json(
+      { error: "This event has expired.", code: "EVENT_EXPIRED" },
+      { status: 410, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const event = pageState.state === "ok" ? pageState.event : null;
   if (
     !event ||
     event.id !== payload.eventId ||
@@ -213,6 +220,16 @@ export async function POST(
             code: "NOT_RELEASED",
           },
           { status: 403, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+
+      if (claimRow?.reason === "event_expired") {
+        return NextResponse.json(
+          {
+            error: "This event has expired.",
+            code: "EVENT_EXPIRED",
+          },
+          { status: 410, headers: { "Cache-Control": "no-store" } },
         );
       }
 

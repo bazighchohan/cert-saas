@@ -46,8 +46,15 @@ export async function POST(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const { eventId: rawEventId } = await context.params;
+  const evParsed = UuidSchema.safeParse(rawEventId);
+  if (!evParsed.success) {
+    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
+  }
+  const eventId = evParsed.data;
+
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return NextResponse.json(
@@ -58,12 +65,6 @@ export async function POST(
     throw err;
   }
 
-  const { eventId: rawEventId } = await context.params;
-  const evParsed = UuidSchema.safeParse(rawEventId);
-  if (!evParsed.success) {
-    return NextResponse.json({ error: "Invalid event ID." }, { status: 400 });
-  }
-  const eventId = evParsed.data;
   const supabase = await createSupabaseServerClient();
 
   const [eventRes, typesRes] = await Promise.all([

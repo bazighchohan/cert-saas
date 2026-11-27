@@ -12,6 +12,8 @@ export default async function SuperAdminOrganizationsPage() {
     return null;
   }
 
-  const { organizations, plans } = await getSuperAdminOrganizationsData();
-  return <OrganizationsListClient organizations={organizations} plans={plans} />;
+  const { organizations, presets } = await getSuperAdminOrganizationsData();
+  return (
+    <OrganizationsListClient organizations={organizations} presets={presets} />
+  );
 }

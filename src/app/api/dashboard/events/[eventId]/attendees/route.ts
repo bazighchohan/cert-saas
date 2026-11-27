@@ -71,10 +71,10 @@ export async function GET(
   const eventId = eventIdParsed.data;
   const supabase = await createSupabaseServerClient();
 
-  // Verify the event belongs to the current organization
+  // Verify the event belongs to the current organization and read its max_certificates
   const { data: event } = await supabase
     .from("events")
-    .select("id")
+    .select("id, max_certificates")
     .eq("id", eventId)
     .eq("org_id", org.id)
     .maybeSingle();
@@ -112,9 +112,8 @@ export async function GET(
   } = queryParsed.data;
   const ascending = sortDir === "asc";
 
-  // Fetch current certificate quota usage in parallel
+  // Fetch current per-event certificate usage in parallel
   const quotaPromise = Promise.all([
-    supabase.from("plans").select("*").eq("id", org.planId).maybeSingle(),
     supabase
       .from("attendee_certificates")
       .select("id", { count: "exact", head: true })
@@ -231,8 +230,11 @@ export async function GET(
     );
   }
 
-  const [planRes, eventCertsRes, orgCertsRes] = await quotaPromise;
-  const planData = planRes.data as Record<string, unknown> | null;
+  const [eventCertsRes, orgCertsRes] = await quotaPromise;
+  const maxCerts = Math.max(
+    1,
+    Number((event as Record<string, unknown>).max_certificates ?? 50),
+  );
 
   return NextResponse.json(
     {
@@ -242,17 +244,11 @@ export async function GET(
       pageSize,
       totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
       quota: {
-        planName: (planData?.name as string) ?? org.planId,
+        planName: org.packageLabel,
         eventCertsUsed: eventCertsRes.count ?? 0,
-        maxCertificatesPerEvent:
-          planData?.max_certificates_per_event === undefined
-            ? 50
-            : ((planData.max_certificates_per_event as number | null) ?? null),
+        maxCertificatesPerEvent: maxCerts,
         orgCertsUsed: orgCertsRes.count ?? 0,
-        maxCertificatesTotal:
-          planData?.max_certificates_total === undefined
-            ? 50
-            : ((planData.max_certificates_total as number | null) ?? null),
+        maxCertificatesTotal: null,
       },
     },
     { headers: { "Cache-Control": "no-store" } },

@@ -2,54 +2,100 @@ import "server-only";
 
 import { cache } from "react";
 import { requireDashboardAuth, type CurrentOrg, type CurrentUser } from "@/lib/auth";
+import {
+  isPlanExpired,
+  sortActiveUnexpiredPurchases,
+  type PurchaseStatus,
+} from "@/lib/plan-enforcement-helpers";
+import {
+  type PackageKind,
+  type PricedPlanPreset,
+  type PricingConfig,
+} from "@/lib/pricing";
+import { getPricingAndPresets } from "@/lib/pricing-server";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export interface PlanDetails {
+export type PaymentMethod = "bank" | "jazzcash" | "easypaisa" | "pilot" | "manual";
+
+export interface PurchaseRow {
   id: string;
-  name: string;
-  maxEvents: number | null;
-  maxCertificatesPerEvent: number | null;
-  maxCertificatesTotal: number | null;
-  maxCertificateTypesPerEvent: number | null;
-  allowCustomBranding: boolean;
-  pricePkr: number;
+  orgId: string;
+  orgName?: string;
+  planId: string | null;
+  kind: PackageKind;
+  eventsTotal: number;
+  eventsUsed: number;
+  eventsRemaining: number;
+  certsPerEvent: number;
+  months: number;
+  listPricePkr: number;
+  discountPkr: number;
+  finalPricePkr: number;
+  isPilot: boolean;
+  paymentMethod: PaymentMethod | null;
+  transactionReference: string | null;
+  hasScreenshot: boolean;
+  paymentNote: string | null;
+  status: PurchaseStatus;
+  effectiveStatus: PurchaseStatus;
+  startsAt: string | null;
+  expiresAt: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
+export interface CertificateTopupRow {
+  id: string;
+  orgId: string;
+  orgName?: string;
+  eventId: string;
+  eventTitle: string;
+  certsAdded: number;
+  certRatePkr: number;
+  amountPkr: number;
+  paymentMethod: PaymentMethod | null;
+  transactionReference: string | null;
+  hasScreenshot: boolean;
+  paymentNote: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
+export interface CreateEventBlockInfo {
+  code:
+    | "PURCHASE_PENDING"
+    | "NO_ACTIVE_PURCHASE"
+    | "NO_EVENT_SLOTS"
+    | "PURCHASE_EXPIRED";
+  message: string;
 }
 
 export interface OrgUsageSummary {
   org: CurrentOrg;
   user: CurrentUser;
-  plan: PlanDetails;
-  eventsUsed: number;
+  purchases: PurchaseRow[];
+  activePurchases: PurchaseRow[];
+  pendingPurchases: PurchaseRow[];
+  eventsUsedTotal: number;
+  eventsSlotsUsed: number;
+  eventsSlotsTotal: number;
+  eventsSlotsRemaining: number;
+  soonestActiveExpiry: string | null;
   certificatesUsed: number;
-}
-
-export type PaymentMethod = "bank" | "jazzcash" | "easypaisa";
-export type PaymentRequestStatus = "pending" | "approved" | "rejected";
-
-export interface PaymentRequestRow {
-  id: string;
-  orgId: string;
-  orgName?: string;
-  planId: string;
-  planName: string;
-  amountPkr: number;
-  paymentMethod: PaymentMethod;
-  transactionReference: string;
-  hasScreenshot: boolean;
-  status: PaymentRequestStatus;
-  billingDays: number;
-  reviewerNote: string | null;
-  reviewedAt: string | null;
-  createdAt: string;
+  createEventBlock: CreateEventBlockInfo | null;
 }
 
 export interface BillingDashboardData extends OrgUsageSummary {
-  allPlans: PlanDetails[];
-  paymentRequests: PaymentRequestRow[];
+  pricingConfig: PricingConfig;
+  presets: PricedPlanPreset[];
+  events: EventSummaryRow[];
+  topups: CertificateTopupRow[];
   isSuperAdmin: boolean;
-  adminPendingRequests: PaymentRequestRow[];
 }
 
 export interface CertificateTypeRow {
@@ -78,6 +124,9 @@ export interface CertificateTypeRow {
 export interface EventSummaryRow {
   id: string;
   orgId: string;
+  purchaseId: string | null;
+  maxCertificates: number;
+  retentionUntil: string | null;
   title: string;
   subtitle: string | null;
   slug: string;
@@ -95,42 +144,157 @@ export interface EventSummaryRow {
   createdAt: string;
   updatedAt: string;
   attendeeCount: number;
+  certificatesIssuedCount?: number;
 }
 
 export interface EventDetail extends EventSummaryRow {
   certificateTypes: CertificateTypeRow[];
   certificateTypesCount: number;
   maxCertificateTypesPerEvent: number | null;
-  planName: string;
+  packageLabel: string;
+  purchaseStatus: PurchaseStatus | "missing";
+  purchaseExpiresAt: string | null;
+  isPurchaseExpired: boolean;
   certificatesIssuedCount: number;
   certificatesDownloadedCount: number;
 }
 
-const DEFAULT_FREE_PLAN: PlanDetails = {
-  id: "free",
-  name: "Free",
-  maxEvents: 1,
-  maxCertificatesPerEvent: 50,
-  maxCertificatesTotal: 50,
-  maxCertificateTypesPerEvent: 3,
-  allowCustomBranding: false,
-  pricePkr: 0,
-};
+export function mapPurchaseRow(
+  r: Record<string, unknown>,
+  nowMs = Date.now(),
+): PurchaseRow {
+  const rawKind = String(r.kind ?? "custom");
+  const kind: PackageKind = (
+    ["single", "multi", "pro", "custom"] as const
+  ).includes(rawKind as PackageKind)
+    ? (rawKind as PackageKind)
+    : "custom";
+
+  const rawStatus = String(r.status ?? "pending");
+  const status: PurchaseStatus = (
+    ["pending", "active", "rejected", "expired"] as const
+  ).includes(rawStatus as PurchaseStatus)
+    ? (rawStatus as PurchaseStatus)
+    : "pending";
+
+  const expiresAt = typeof r.expires_at === "string" ? r.expires_at : null;
+  const effectiveStatus: PurchaseStatus =
+    status === "active" && isPlanExpired(expiresAt, nowMs) ? "expired" : status;
+
+  const eventsTotal = Math.max(1, Number(r.events_total ?? 1));
+  const eventsUsed = Math.max(0, Number(r.events_used ?? 0));
+
+  const orgRel = Array.isArray(r.organizations)
+    ? (r.organizations[0] as Record<string, unknown> | undefined)
+    : (r.organizations as Record<string, unknown> | undefined);
+
+  const rawMethod = r.payment_method ? String(r.payment_method) : null;
+  const paymentMethod: PaymentMethod | null =
+    rawMethod &&
+    ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
+      ? (rawMethod as PaymentMethod)
+      : null;
+
+  return {
+    id: String(r.id),
+    orgId: String(r.org_id),
+    orgName: typeof orgRel?.name === "string" ? orgRel.name : undefined,
+    planId: typeof r.plan_id === "string" ? r.plan_id : null,
+    kind,
+    eventsTotal,
+    eventsUsed,
+    eventsRemaining: Math.max(0, eventsTotal - eventsUsed),
+    certsPerEvent: Math.max(1, Number(r.certs_per_event ?? 50)),
+    months: Number(r.months ?? 3),
+    listPricePkr: Number(r.list_price_pkr ?? 0),
+    discountPkr: Number(r.discount_pkr ?? 0),
+    finalPricePkr: Number(r.final_price_pkr ?? 0),
+    isPilot: Boolean(r.is_pilot),
+    paymentMethod,
+    transactionReference:
+      typeof r.transaction_reference === "string"
+        ? r.transaction_reference
+        : null,
+    hasScreenshot: Boolean(r.screenshot_path),
+    paymentNote: typeof r.payment_note === "string" ? r.payment_note : null,
+    status,
+    effectiveStatus,
+    startsAt: typeof r.starts_at === "string" ? r.starts_at : null,
+    expiresAt,
+    reviewedBy: typeof r.reviewed_by === "string" ? r.reviewed_by : null,
+    reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
+    createdAt: String(r.created_at ?? new Date().toISOString()),
+  };
+}
+
+export function mapTopupRow(
+  r: Record<string, unknown>,
+  eventTitleById: Map<string, string>,
+): CertificateTopupRow {
+  const evRel = Array.isArray(r.events)
+    ? (r.events[0] as Record<string, unknown> | undefined)
+    : (r.events as Record<string, unknown> | undefined);
+  const orgRel = Array.isArray(r.organizations)
+    ? (r.organizations[0] as Record<string, unknown> | undefined)
+    : (r.organizations as Record<string, unknown> | undefined);
+
+  const eventId = String(r.event_id);
+  const eventTitle =
+    (typeof evRel?.title === "string" ? evRel.title : null) ??
+    eventTitleById.get(eventId) ??
+    "Event";
+
+  const rawMethod = r.payment_method ? String(r.payment_method) : null;
+  const paymentMethod: PaymentMethod | null =
+    rawMethod &&
+    ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
+      ? (rawMethod as PaymentMethod)
+      : null;
+
+  const rawStatus = String(r.status ?? "pending");
+  const status = (
+    ["pending", "approved", "rejected"] as const
+  ).includes(rawStatus as "pending" | "approved" | "rejected")
+    ? (rawStatus as "pending" | "approved" | "rejected")
+    : "pending";
+
+  return {
+    id: String(r.id),
+    orgId: String(r.org_id),
+    orgName: typeof orgRel?.name === "string" ? orgRel.name : undefined,
+    eventId,
+    eventTitle,
+    certsAdded: Number(r.certs_added ?? 0),
+    certRatePkr: Number(r.cert_rate_pkr ?? 5),
+    amountPkr: Number(r.amount_pkr ?? 0),
+    paymentMethod,
+    transactionReference:
+      typeof r.transaction_reference === "string"
+        ? r.transaction_reference
+        : null,
+    hasScreenshot: Boolean(r.screenshot_path),
+    paymentNote: typeof r.payment_note === "string" ? r.payment_note : null,
+    status,
+    reviewedBy: typeof r.reviewed_by === "string" ? r.reviewed_by : null,
+    reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
+    createdAt: String(r.created_at ?? new Date().toISOString()),
+  };
+}
 
 /**
- * Loads the current organization's active plan details and current usage
- * (events count & issued certificates count), strictly scoped via getCurrentOrg().
+ * Loads the current organization's package purchases, slot availability,
+ * expiry countdown, and overall usage strictly scoped via `getCurrentOrg()`.
  */
 export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
   const { user, org } = await requireDashboardAuth();
   const supabase = await createSupabaseServerClient();
 
-  const [planRes, eventsCountRes, certsCountRes] = await Promise.all([
+  const [purchasesRes, eventsCountRes, certsCountRes] = await Promise.all([
     supabase
-      .from("plans")
+      .from("purchases")
       .select("*")
-      .eq("id", org.planId)
-      .maybeSingle(),
+      .eq("org_id", org.id)
+      .order("created_at", { ascending: false }),
     supabase
       .from("events")
       .select("id", { count: "exact", head: true })
@@ -141,31 +305,99 @@ export const getOrgPlanAndUsage = cache(async (): Promise<OrgUsageSummary> => {
       .eq("org_id", org.id),
   ]);
 
-  const p = planRes.data as Record<string, unknown> | null;
-  const plan: PlanDetails = p
-    ? {
-        id: p.id as string,
-        name: p.name as string,
-        maxEvents: (p.max_events as number | null) ?? null,
-        maxCertificatesPerEvent:
-          (p.max_certificates_per_event as number | null) ?? null,
-        maxCertificatesTotal:
-          (p.max_certificates_total as number | null) ?? null,
-        maxCertificateTypesPerEvent:
-          p.max_certificate_types_per_event === undefined
-            ? 3
-            : ((p.max_certificate_types_per_event as number | null) ?? null),
-        allowCustomBranding: Boolean(p.allow_custom_branding),
-        pricePkr: Number(p.price_pkr ?? 0),
-      }
-    : { ...DEFAULT_FREE_PLAN, id: org.planId };
+  const nowMs = Date.now();
+  const purchases = (
+    (purchasesRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapPurchaseRow(r, nowMs));
+
+  const activeSorted = sortActiveUnexpiredPurchases(
+    purchases.map((p) => ({
+      id: p.id,
+      orgId: p.orgId,
+      planId: p.planId,
+      kind: p.kind,
+      eventsTotal: p.eventsTotal,
+      eventsUsed: p.eventsUsed,
+      certsPerEvent: p.certsPerEvent,
+      months: p.months,
+      status: p.status,
+      isPilot: p.isPilot,
+      startsAt: p.startsAt,
+      expiresAt: p.expiresAt,
+      createdAt: p.createdAt,
+    })),
+    org.id,
+    nowMs,
+  );
+
+  const activeIds = new Set(activeSorted.map((a) => a.id));
+  const activePurchases = purchases
+    .filter((p) => activeIds.has(p.id))
+    .sort((a, b) => {
+      const aExp = a.expiresAt ? Date.parse(a.expiresAt) : Number.MAX_SAFE_INTEGER;
+      const bExp = b.expiresAt ? Date.parse(b.expiresAt) : Number.MAX_SAFE_INTEGER;
+      return aExp - bExp;
+    });
+
+  const pendingPurchases = purchases.filter((p) => p.status === "pending");
+  const expiredPurchases = purchases.filter(
+    (p) => p.effectiveStatus === "expired",
+  );
+
+  const eventsSlotsUsed = activePurchases.reduce(
+    (sum, p) => sum + p.eventsUsed,
+    0,
+  );
+  const eventsSlotsTotal = activePurchases.reduce(
+    (sum, p) => sum + p.eventsTotal,
+    0,
+  );
+  const eventsSlotsRemaining = activePurchases.reduce(
+    (sum, p) => sum + p.eventsRemaining,
+    0,
+  );
+  const soonestActiveExpiry = activePurchases[0]?.expiresAt ?? null;
+
+  let createEventBlock: CreateEventBlockInfo | null = null;
+  if (eventsSlotsRemaining <= 0) {
+    if (pendingPurchases.length > 0) {
+      createEventBlock = {
+        code: "PURCHASE_PENDING",
+        message:
+          "Your package purchase is waiting for approval. You will be able to create events as soon as it is approved.",
+      };
+    } else if (activePurchases.length > 0) {
+      createEventBlock = {
+        code: "NO_EVENT_SLOTS",
+        message: `No event slots left in your active package(s) (${eventsSlotsUsed} / ${eventsSlotsTotal} events used). Buy another package in Billing to create more events.`,
+      };
+    } else if (expiredPurchases.length > 0) {
+      createEventBlock = {
+        code: "PURCHASE_EXPIRED",
+        message:
+          "Your package has expired — buy a package in Billing to create new events. Read access and exports remain available.",
+      };
+    } else {
+      createEventBlock = {
+        code: "NO_ACTIVE_PURCHASE",
+        message: "Buy a package in Billing before creating or releasing events.",
+      };
+    }
+  }
 
   return {
     org,
     user,
-    plan,
-    eventsUsed: eventsCountRes.count ?? 0,
+    purchases,
+    activePurchases,
+    pendingPurchases,
+    eventsUsedTotal: eventsCountRes.count ?? 0,
+    eventsSlotsUsed,
+    eventsSlotsTotal,
+    eventsSlotsRemaining,
+    soonestActiveExpiry,
     certificatesUsed: certsCountRes.count ?? 0,
+    createEventBlock,
   };
 });
 
@@ -178,9 +410,24 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
     ? Number(attendeesRel[0]?.count ?? 0)
     : Number(attendeesRel?.count ?? 0);
 
+  const certsRel = row.attendee_certificates as
+    | Array<{ count?: number }>
+    | { count?: number }
+    | null;
+  const certificatesIssuedCount =
+    certsRel !== undefined && certsRel !== null
+      ? Array.isArray(certsRel)
+        ? Number(certsRel[0]?.count ?? 0)
+        : Number(certsRel?.count ?? 0)
+      : undefined;
+
   return {
     id: row.id as string,
     orgId: row.org_id as string,
+    purchaseId: typeof row.purchase_id === "string" ? row.purchase_id : null,
+    maxCertificates: Math.max(1, Number(row.max_certificates ?? 50)),
+    retentionUntil:
+      typeof row.retention_until === "string" ? row.retention_until : null,
     title: row.title as string,
     subtitle: (row.subtitle as string | null) ?? null,
     slug: row.slug as string,
@@ -220,6 +467,7 @@ function mapEventRow(row: Record<string, unknown>): EventSummaryRow {
     createdAt: row.created_at as string,
     updatedAt: (row.updated_at as string) ?? (row.created_at as string),
     attendeeCount,
+    certificatesIssuedCount,
   };
 }
 
@@ -275,7 +523,7 @@ function mapCertificateTypeRow(row: Record<string, unknown>): CertificateTypeRow
 }
 
 /**
- * Lists all events belonging to the current organization (getCurrentOrg()).
+ * Lists all events belonging to the current organization (`getCurrentOrg()`).
  */
 export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
   const { org } = await requireDashboardAuth();
@@ -283,7 +531,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
 
   const { data, error } = await supabase
     .from("events")
-    .select("*, attendees(count)")
+    .select("*, attendees(count), attendee_certificates(count)")
     .eq("org_id", org.id)
     .order("created_at", { ascending: false });
 
@@ -295,8 +543,7 @@ export const getOrgEvents = cache(async (): Promise<EventSummaryRow[]> => {
 });
 
 /**
- * Fetches a single event by id ONLY if it belongs to getCurrentOrg().
- * Returns null if the event does not exist or belongs to another organization.
+ * Fetches a single event by id ONLY if it belongs to `getCurrentOrg()`.
  */
 export async function getOrgEventById(
   eventId: string,
@@ -344,116 +591,65 @@ export async function getOrgEventById(
   );
 
   const base = mapEventRow(data as Record<string, unknown>);
+  const linkedPurchase = base.purchaseId
+    ? usage.purchases.find((p) => p.id === base.purchaseId)
+    : undefined;
+
+  const purchaseStatus: PurchaseStatus | "missing" = linkedPurchase
+    ? linkedPurchase.effectiveStatus
+    : "missing";
+  const purchaseExpiresAt = linkedPurchase?.expiresAt ?? null;
+  const isPurchaseExpired = purchaseStatus === "expired";
+
+  const packageLabel = linkedPurchase
+    ? linkedPurchase.isPilot
+      ? "Pilot Package"
+      : `${linkedPurchase.kind.toUpperCase()} Package`
+    : org.packageLabel;
+
   return {
     ...base,
     certificateTypes,
     certificateTypesCount: certificateTypes.length,
-    maxCertificateTypesPerEvent: usage.plan.maxCertificateTypesPerEvent,
-    planName: usage.plan.name,
+    maxCertificateTypesPerEvent: 20,
+    packageLabel,
+    purchaseStatus,
+    purchaseExpiresAt,
+    isPurchaseExpired,
     certificatesIssuedCount: issuedRes.count ?? 0,
     certificatesDownloadedCount: downloadedRes.count ?? 0,
   };
 }
 
-function mapPlanRow(p: Record<string, unknown>): PlanDetails {
-  return {
-    id: p.id as string,
-    name: p.name as string,
-    maxEvents: (p.max_events as number | null) ?? null,
-    maxCertificatesPerEvent:
-      (p.max_certificates_per_event as number | null) ?? null,
-    maxCertificatesTotal: (p.max_certificates_total as number | null) ?? null,
-    maxCertificateTypesPerEvent:
-      p.max_certificate_types_per_event === undefined
-        ? null
-        : ((p.max_certificate_types_per_event as number | null) ?? null),
-    allowCustomBranding: Boolean(p.allow_custom_branding),
-    pricePkr: Number(p.price_pkr ?? 0),
-  };
-}
-
-function mapPaymentRequestRow(
-  r: Record<string, unknown>,
-  planNameById: Map<string, string>,
-): PaymentRequestRow {
-  const planId = (r.plan_id as string) || "starter";
-  const orgRel = Array.isArray(r.organizations)
-    ? (r.organizations[0] as Record<string, unknown> | undefined)
-    : (r.organizations as Record<string, unknown> | undefined);
-
-  return {
-    id: r.id as string,
-    orgId: r.org_id as string,
-    orgName: typeof orgRel?.name === "string" ? orgRel.name : undefined,
-    planId,
-    planName: planNameById.get(planId) ?? planId,
-    amountPkr: Number(r.amount_pkr ?? 0),
-    paymentMethod: (["bank", "jazzcash", "easypaisa"].includes(
-      String(r.payment_method),
-    )
-      ? String(r.payment_method)
-      : "bank") as PaymentMethod,
-    transactionReference: String(r.transaction_reference ?? ""),
-    hasScreenshot: Boolean(r.screenshot_path),
-    status: (["pending", "approved", "rejected"].includes(String(r.status))
-      ? String(r.status)
-      : "pending") as PaymentRequestStatus,
-    billingDays: Number(r.billing_days ?? 30),
-    reviewerNote:
-      typeof r.reviewer_note === "string" ? r.reviewer_note : null,
-    reviewedAt: typeof r.reviewed_at === "string" ? r.reviewed_at : null,
-    createdAt: String(r.created_at ?? new Date().toISOString()),
-  };
-}
-
 export async function getBillingDashboardData(): Promise<BillingDashboardData> {
-  const usage = await getOrgPlanAndUsage();
-  const supabase = await createSupabaseServerClient();
-  const admin = getSupabaseAdmin();
-  const superAdmin = await isUserInSuperAdminsTable(usage.user.id);
-
-  const [plansRes, orgReqsRes, adminReqsRes] = await Promise.all([
-    supabase
-      .from("plans")
-      .select("*")
-      .eq("active", true)
-      .order("price_pkr", { ascending: true }),
-    supabase
-      .from("payment_requests")
-      .select("*")
-      .eq("org_id", usage.org.id)
-      .order("created_at", { ascending: false })
-      .limit(25),
-    superAdmin
-      ? admin
-          .from("payment_requests")
-          .select("*, organizations(name)")
-          .eq("status", "pending")
-          .order("created_at", { ascending: true })
-          .limit(50)
-      : Promise.resolve({ data: null, error: null }),
+  const [usage, events, { pricingConfig, presets }] = await Promise.all([
+    getOrgPlanAndUsage(),
+    getOrgEvents(),
+    getPricingAndPresets(),
   ]);
 
-  const allPlans =
-    plansRes.data && plansRes.data.length > 0
-      ? plansRes.data.map((row) => mapPlanRow(row as Record<string, unknown>))
-      : [DEFAULT_FREE_PLAN];
+  const supabase = await createSupabaseServerClient();
+  const [topupsRes, superAdmin] = await Promise.all([
+    supabase
+      .from("certificate_topups")
+      .select("*, events(title)")
+      .eq("org_id", usage.org.id)
+      .order("created_at", { ascending: false })
+      .limit(50),
+    isUserInSuperAdminsTable(usage.user.id),
+  ]);
 
-  const planNameById = new Map(allPlans.map((p) => [p.id, p.name]));
-
-  const paymentRequests = (orgReqsRes.data ?? []).map((row) =>
-    mapPaymentRequestRow(row as Record<string, unknown>, planNameById),
-  );
-
-  const adminPendingRequests = (adminReqsRes.data ?? []).map((row) =>
-    mapPaymentRequestRow(row as Record<string, unknown>, planNameById),
-  );
+  const eventTitleById = new Map(events.map((e) => [e.id, e.title]));
+  const topups = (
+    (topupsRes.data ?? []) as Array<Record<string, unknown>>
+  ).map((r) => mapTopupRow(r, eventTitleById));
 
   return {
     ...usage,
-    allPlans,
-    paymentRequests,
+    pricingConfig,
+    presets,
+    events,
+    topups,
     isSuperAdmin: superAdmin,
-    adminPendingRequests,
   };
 }

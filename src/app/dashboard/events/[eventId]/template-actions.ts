@@ -6,6 +6,7 @@ import { resolveCuratedFont } from "@/lib/fonts";
 import {
   assertWithinPlan,
   isPlanEnforcementError,
+  type PlanErrorCode,
 } from "@/lib/plan-enforcement";
 import {
   AddCertificateTypeSchema,
@@ -22,12 +23,7 @@ import { validateAndInspectTemplate } from "@/lib/template-validator";
 export interface TemplateActionResult {
   success?: boolean;
   error?: string;
-  code?:
-    | "PLAN_LIMIT_REACHED"
-    | "PLAN_EXPIRED"
-    | "ORG_SUSPENDED"
-    | "VALIDATION_ERROR"
-    | "NOT_FOUND";
+  code?: PlanErrorCode | "VALIDATION_ERROR" | "NOT_FOUND";
   certTypeId?: string;
 }
 
@@ -44,7 +40,6 @@ function slugifyTypeKey(label: string): string {
 
 /**
  * Adds a new certificate type (e.g. Participation, Appreciation, Winner) to an event.
- * Enforces plans.max_certificate_types_per_event server-side.
  */
 export async function addCertificateTypeAction(input: {
   eventId: string;
@@ -66,7 +61,10 @@ export async function addCertificateTypeAction(input: {
   const cleanLabel = addParsed.data.label;
 
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, addParsed.data.eventId, {
+      kind: "certificate_type",
+      add: 1,
+    });
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return { code: err.code, error: err.message };
@@ -77,7 +75,6 @@ export async function addCertificateTypeAction(input: {
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  // Verify event belongs to org.id.
   const { data: event } = await supabase
     .from("events")
     .select("id")
@@ -89,20 +86,6 @@ export async function addCertificateTypeAction(input: {
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
 
-  // Central plan & expiration enforcement (max_certificate_types_per_event + read-only check).
-  try {
-    await assertWithinPlan(org.id, {
-      kind: "certificate_type",
-      eventId: input.eventId,
-      add: 1,
-    });
-  } catch (err) {
-    if (isPlanEnforcementError(err)) {
-      return { code: err.code, error: err.message };
-    }
-    throw err;
-  }
-
   const { data: existingData } = await supabase
     .from("certificate_types")
     .select("id, key")
@@ -110,7 +93,6 @@ export async function addCertificateTypeAction(input: {
     .eq("event_id", input.eventId);
 
   const existingTypes = existingData ?? [];
-
   const usedKeys = new Set(existingTypes.map((r) => r.key as string));
   const baseKey = slugifyTypeKey(cleanLabel);
   let key = baseKey;
@@ -181,7 +163,7 @@ export async function renameCertificateTypeAction(input: {
   const cleanLabel = renParsed.data.label;
 
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, renParsed.data.eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return { code: err.code, error: err.message };
@@ -241,18 +223,18 @@ export async function selectTemplatePageAction(input: {
     return { error: "You must be signed in." };
   }
 
+  const selParsed = SelectTemplatePageSchema.safeParse(input);
+  if (!selParsed.success) {
+    return { error: formatZodError(selParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, selParsed.data.eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return { code: err.code, error: err.message };
     }
     throw err;
-  }
-
-  const selParsed = SelectTemplatePageSchema.safeParse(input);
-  if (!selParsed.success) {
-    return { error: formatZodError(selParsed.error), code: "VALIDATION_ERROR" };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -346,18 +328,18 @@ export async function deleteCertificateTypeAction(input: {
     return { error: "You must be signed in." };
   }
 
+  const delParsed = DeleteCertificateTypeSchema.safeParse(input);
+  if (!delParsed.success) {
+    return { error: formatZodError(delParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, delParsed.data.eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return { code: err.code, error: err.message };
     }
     throw err;
-  }
-
-  const delParsed = DeleteCertificateTypeSchema.safeParse(input);
-  if (!delParsed.success) {
-    return { error: formatZodError(delParsed.error), code: "VALIDATION_ERROR" };
   }
 
   const supabase = await createSupabaseServerClient();
@@ -443,21 +425,21 @@ export async function saveNamePlacementAction(
     return { error: "You must be signed in." };
   }
 
-  try {
-    await assertWithinPlan(org.id, "write");
-  } catch (err) {
-    if (isPlanEnforcementError(err)) {
-      return { code: err.code, error: err.message };
-    }
-    throw err;
-  }
-
   const placeParsed = SaveNamePlacementSchema.safeParse(input);
   if (!placeParsed.success) {
     return {
       error: formatZodError(placeParsed.error),
       code: "VALIDATION_ERROR",
     };
+  }
+
+  try {
+    await assertWithinPlan(org.id, placeParsed.data.eventId, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const nameXPt = Number(Number(placeParsed.data.nameXPt).toFixed(2));

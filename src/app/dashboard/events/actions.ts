@@ -6,6 +6,7 @@ import { validateEventSlug } from "@/lib/event-validation";
 import {
   assertWithinPlan,
   isPlanEnforcementError,
+  type PlanErrorCode,
 } from "@/lib/plan-enforcement";
 import {
   DeleteEventSchema,
@@ -21,9 +22,7 @@ export interface EventActionResult {
   success?: boolean;
   error?: string;
   code?:
-    | "PLAN_LIMIT_REACHED"
-    | "PLAN_EXPIRED"
-    | "ORG_SUSPENDED"
+    | PlanErrorCode
     | "SLUG_TAKEN"
     | "VALIDATION_ERROR"
     | "NOT_FOUND";
@@ -59,6 +58,12 @@ export interface UpdateEventSettingsInput {
   downloadLimit: number | null;
   showQr?: boolean;
   qrPosition?: "bottom-right" | "bottom-left" | "top-right" | "top-left" | "custom";
+}
+
+function addMonthsUtcIso(months: number, fromDate = new Date()): string {
+  const d = new Date(fromDate.getTime());
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString();
 }
 
 function validateCommonDetails(input: {
@@ -125,10 +130,59 @@ function validateCommonDetails(input: {
   };
 }
 
+function mapSlotRpcError(rawMessage: string): {
+  code?: EventActionResult["code"];
+  error: string;
+} {
+  if (rawMessage.includes("PURCHASE_PENDING")) {
+    return {
+      code: "PURCHASE_PENDING",
+      error:
+        "Your package purchase is waiting for approval. You will be able to create events as soon as it is approved.",
+    };
+  }
+  if (rawMessage.includes("NO_EVENT_SLOTS")) {
+    return {
+      code: "NO_EVENT_SLOTS",
+      error:
+        "No event slots left in your active package(s). Buy another package in Billing to create more events.",
+    };
+  }
+  if (rawMessage.includes("PURCHASE_EXPIRED")) {
+    return {
+      code: "PURCHASE_EXPIRED",
+      error:
+        "Your package has expired — buy a package in Billing to create new events.",
+    };
+  }
+  if (rawMessage.includes("NO_ACTIVE_PURCHASE")) {
+    return {
+      code: "NO_ACTIVE_PURCHASE",
+      error: "Please buy a package in Billing before creating an event.",
+    };
+  }
+  if (rawMessage.includes("ORG_SUSPENDED")) {
+    return {
+      code: "ORG_SUSPENDED",
+      error: "Your organization account is suspended.",
+    };
+  }
+  if (rawMessage.includes("SLUG_TAKEN") || rawMessage.includes("23505")) {
+    return {
+      code: "SLUG_TAKEN",
+      error: "That URL slug is already taken. Please choose a different slug.",
+    };
+  }
+  return {
+    error: "Failed to create event. Please try again.",
+  };
+}
+
 /**
- * Creates a new event for getCurrentOrg().
- * Enforces plan.max_events server-side, checks global slug uniqueness,
- * creates a default 'participation' certificate_type, and writes to audit_log.
+ * Creates a new event for `getCurrentOrg()` inside a single database transaction
+ * (`create_event_consuming_slot`), consuming 1 slot from the soonest-expiring
+ * active purchase, copying `max_certificates` from it, creating the default
+ * `participation` certificate_type, and logging `event.created` to `audit_log`.
  */
 export async function createEventAction(
   input: CreateEventInput,
@@ -149,12 +203,9 @@ export async function createEventAction(
     return { error: validated.error, code: "VALIDATION_ERROR" };
   }
 
-  const supabase = await createSupabaseServerClient();
-  const admin = getSupabaseAdmin();
-
-  // 1. Central plan & expiration enforcement (max_events + read-only check).
+  // 1. Pre-check via central assertWithinPlan(orgId, eventId, action)
   try {
-    await assertWithinPlan(org.id, "event");
+    await assertWithinPlan(org.id, null, "create_event");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return {
@@ -165,79 +216,55 @@ export async function createEventAction(
     throw err;
   }
 
-  // 2. Check global slug uniqueness across all tenants (admin client because RLS hides other orgs' events).
-  const { data: existingSlug } = await admin
-    .from("events")
-    .select("id")
-    .eq("slug", validated.clean.slug)
-    .maybeSingle();
+  const admin = getSupabaseAdmin();
 
-  if (existingSlug) {
-    return {
-      code: "SLUG_TAKEN",
-      error: `The URL slug "${validated.clean.slug}" is already taken. Please choose a different slug.`,
-    };
-  }
+  // 2. Atomic transactional slot consumption + event creation via SQL RPC
+  const { data: rpcRows, error: rpcErr } = await admin.rpc(
+    "create_event_consuming_slot",
+    {
+      p_org_id: org.id,
+      p_user_id: user.id,
+      p_title: validated.clean.title,
+      p_subtitle: validated.clean.subtitle,
+      p_slug: validated.clean.slug,
+      p_event_date: validated.clean.event_date,
+      p_contact_email: validated.clean.contact_email,
+      p_contact_phone: validated.clean.contact_phone,
+      p_released: false,
+    },
+  );
 
-  // 3. Insert the event scoped to org.id.
-  const { data: created, error: insertErr } = await supabase
-    .from("events")
-    .insert({
-      org_id: org.id,
-      ...validated.clean,
-    })
-    .select("id, slug, title")
-    .maybeSingle();
-
-  if (insertErr || !created) {
-    if (insertErr?.code === "23505") {
+  if (rpcErr) {
+    if (rpcErr.code === "23505") {
       return {
         code: "SLUG_TAKEN",
         error: `The URL slug "${validated.clean.slug}" is already taken. Please choose a different slug.`,
       };
     }
-    return {
-      error: sanitizeClientErrorMessage(insertErr, "Failed to create event."),
-    };
+    const mapped = mapSlotRpcError(rpcErr.message || "");
+    return mapped;
   }
 
-  const eventId = created.id as string;
+  const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | { event_id?: string; slug?: string }
+    | undefined;
 
-  // 4. Create a default 'participation' certificate type for the event.
-  await supabase.from("certificate_types").insert({
-    org_id: org.id,
-    event_id: eventId,
-    key: "participation",
-    label: "Certificate of Participation",
-  });
-
-  // 5. Write audit_log entry.
-  try {
-    await admin.from("audit_log").insert({
-      org_id: org.id,
-      user_id: user.id,
-      action: "event.created",
-      details: {
-        event_id: eventId,
-        title: validated.clean.title,
-        slug: validated.clean.slug,
-      },
-    });
-  } catch (err) {
-    console.error("Failed to write audit_log for event.created:", err);
+  if (!row?.event_id) {
+    return { error: "Failed to create event." };
   }
 
   revalidatePath("/dashboard", "layout");
+  revalidatePath("/dashboard/billing");
   return {
     success: true,
-    eventId,
-    slug: created.slug as string,
+    eventId: row.event_id,
+    slug: row.slug || validated.clean.slug,
   };
 }
 
 /**
  * Updates event overview details (title, subtitle, slug, date, contact info).
- * Scoped strictly to getCurrentOrg(). Writes event.updated to audit_log.
+ * Scoped strictly to `getCurrentOrg()`. Writes `event.updated` to `audit_log`.
  */
 export async function updateEventOverviewAction(
   input: UpdateEventOverviewInput,
@@ -248,18 +275,18 @@ export async function updateEventOverviewAction(
     return { error: "You must be signed in to update an event." };
   }
 
+  const ovParsed = UpdateEventOverviewSchema.safeParse(input);
+  if (!ovParsed.success) {
+    return { error: formatZodError(ovParsed.error), code: "VALIDATION_ERROR" };
+  }
+
   try {
-    await assertWithinPlan(org.id, "write");
+    await assertWithinPlan(org.id, ovParsed.data.eventId, "write");
   } catch (err) {
     if (isPlanEnforcementError(err)) {
       return { code: err.code, error: err.message };
     }
     throw err;
-  }
-
-  const ovParsed = UpdateEventOverviewSchema.safeParse(input);
-  if (!ovParsed.success) {
-    return { error: formatZodError(ovParsed.error), code: "VALIDATION_ERROR" };
   }
 
   const validated = validateCommonDetails(ovParsed.data);
@@ -270,7 +297,6 @@ export async function updateEventOverviewAction(
   const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  // Verify the event belongs to org.id.
   const { data: currentEvent } = await supabase
     .from("events")
     .select("id, slug, title")
@@ -282,7 +308,6 @@ export async function updateEventOverviewAction(
     return { error: "Event not found.", code: "NOT_FOUND" };
   }
 
-  // If slug changed, check global uniqueness across all tenants.
   if (validated.clean.slug !== currentEvent.slug) {
     const { data: slugConflict } = await admin
       .from("events")
@@ -343,9 +368,12 @@ export async function updateEventOverviewAction(
 }
 
 /**
- * Updates event Settings tab fields: released toggle, identifier_label,
- * require_name_match toggle, and download_limit (1, 3, or null = unlimited).
- * Scoped strictly to getCurrentOrg(). Writes event.updated to audit_log.
+ * Updates event Settings tab fields (`released`, `identifier_label`,
+ * `require_name_match`, `download_limit`, `show_qr`, `qr_position`).
+ *
+ * - Enforces `assertWithinPlan(org.id, eventId, "release_event")` when releasing
+ *   so no event can be released without an approved, active purchase.
+ * - Sets `retention_until` to 12 months after the event is released.
  */
 export async function updateEventSettingsAction(
   input: UpdateEventSettingsInput,
@@ -356,21 +384,25 @@ export async function updateEventSettingsAction(
     return { error: "You must be signed in to update event settings." };
   }
 
-  try {
-    await assertWithinPlan(org.id, "write");
-  } catch (err) {
-    if (isPlanEnforcementError(err)) {
-      return { code: err.code, error: err.message };
-    }
-    throw err;
-  }
-
   const settingsParsed = UpdateEventSettingsSchema.safeParse(input);
   if (!settingsParsed.success) {
     return {
       error: formatZodError(settingsParsed.error),
       code: "VALIDATION_ERROR",
     };
+  }
+
+  try {
+    await assertWithinPlan(
+      org.id,
+      settingsParsed.data.eventId,
+      settingsParsed.data.released ? "release_event" : "write",
+    );
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const identifierLabel = settingsParsed.data.identifierLabel;
@@ -380,7 +412,7 @@ export async function updateEventSettingsAction(
 
   const { data: currentEvent } = await supabase
     .from("events")
-    .select("id, slug, released")
+    .select("id, slug, released, retention_until")
     .eq("id", input.eventId)
     .eq("org_id", org.id)
     .maybeSingle();
@@ -401,6 +433,18 @@ export async function updateEventSettingsAction(
       ? input.qrPosition
       : "bottom-right";
 
+  // Set retention_until to 12 months after the event is released
+  const wasReleased = Boolean(currentEvent.released);
+  const existingRetention =
+    typeof (currentEvent as Record<string, unknown>).retention_until === "string"
+      ? ((currentEvent as Record<string, unknown>).retention_until as string)
+      : null;
+
+  const nextRetentionUntil =
+    input.released && (!wasReleased || !existingRetention)
+      ? addMonthsUtcIso(12)
+      : existingRetention;
+
   const basePayload: Record<string, unknown> = {
     released: Boolean(input.released),
     identifier_label: identifierLabel,
@@ -410,6 +454,9 @@ export async function updateEventSettingsAction(
 
   const extendedPayload: Record<string, unknown> = {
     ...basePayload,
+    ...(nextRetentionUntil !== null
+      ? { retention_until: nextRetentionUntil }
+      : {}),
     ...(input.uppercaseIdentifiers !== undefined
       ? { uppercase_identifiers: Boolean(input.uppercaseIdentifiers) }
       : {}),
@@ -425,8 +472,12 @@ export async function updateEventSettingsAction(
     .select("id, slug")
     .maybeSingle();
 
-  // Graceful fallback if 006 / 007 optional columns haven't been applied in Supabase yet
-  if (updateErr && /show_qr|qr_position|uppercase_identifiers/i.test(updateErr.message)) {
+  if (
+    updateErr &&
+    /show_qr|qr_position|uppercase_identifiers|retention_until/i.test(
+      updateErr.message,
+    )
+  ) {
     const retry = await supabase
       .from("events")
       .update(basePayload)
@@ -453,7 +504,8 @@ export async function updateEventSettingsAction(
         event_id: input.eventId,
         section: "settings",
         released: Boolean(input.released),
-        previous_released: Boolean(currentEvent.released),
+        previous_released: wasReleased,
+        retention_until: nextRetentionUntil,
         identifier_label: identifierLabel,
         require_name_match: Boolean(input.requireNameMatch),
         download_limit: input.downloadLimit,
@@ -467,6 +519,7 @@ export async function updateEventSettingsAction(
 
   revalidatePath("/dashboard", "layout");
   revalidatePath(`/dashboard/events/${input.eventId}`);
+  revalidatePath(`/e/${updated.slug as string}`);
   return {
     success: true,
     eventId: input.eventId,
@@ -476,8 +529,6 @@ export async function updateEventSettingsAction(
 
 /**
  * Deletes an event after verifying typed confirmation (must match the event slug).
- * Removes any template files in Storage, deletes the event (cascading attendees,
- * attendee_certificates, certificate_types, and download_log), and writes to audit_log.
  */
 export async function deleteEventAction(input: {
   eventId: string;
@@ -489,21 +540,21 @@ export async function deleteEventAction(input: {
     return { error: "You must be signed in to delete an event." };
   }
 
-  try {
-    await assertWithinPlan(org.id, "write");
-  } catch (err) {
-    if (isPlanEnforcementError(err)) {
-      return { code: err.code, error: err.message };
-    }
-    throw err;
-  }
-
   const delParsed = DeleteEventSchema.safeParse(input);
   if (!delParsed.success) {
     return {
       code: "VALIDATION_ERROR",
       error: formatZodError(delParsed.error),
     };
+  }
+
+  try {
+    await assertWithinPlan(org.id, delParsed.data.eventId, "write");
+  } catch (err) {
+    if (isPlanEnforcementError(err)) {
+      return { code: err.code, error: err.message };
+    }
+    throw err;
   }
 
   const supabase = await createSupabaseServerClient();
@@ -527,7 +578,6 @@ export async function deleteEventAction(input: {
     };
   }
 
-  // 1. Collect any template files associated with this event and remove them from Storage.
   const { data: certTypes } = await supabase
     .from("certificate_types")
     .select("template_path")
@@ -542,11 +592,10 @@ export async function deleteEventAction(input: {
     try {
       await admin.storage.from("templates").remove(templatePaths);
     } catch {
-      // Bucket may not exist yet prior to the storage phase.
+      // Bucket may not exist yet
     }
   }
 
-  // 2. Delete the event (cascades to certificate_types, attendees, attendee_certificates, download_log).
   const { error: delErr } = await supabase
     .from("events")
     .delete()
@@ -557,7 +606,6 @@ export async function deleteEventAction(input: {
     return { error: sanitizeClientErrorMessage(delErr, "Failed to delete event.") };
   }
 
-  // 3. Write audit_log entry.
   try {
     await admin.from("audit_log").insert({
       org_id: org.id,

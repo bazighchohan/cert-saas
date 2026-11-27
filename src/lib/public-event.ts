@@ -33,6 +33,7 @@ export interface PublicEventInfo {
   contactEmail: string | null;
   contactPhone: string | null;
   released: boolean;
+  retentionUntil: string | null;
   identifierLabel: string;
   requireNameMatch: boolean;
   downloadLimit: number | null;
@@ -74,12 +75,23 @@ export function verifyPublicLookupToken(
 export type PublicEventPageState =
   | { state: "not_found" }
   | { state: "unavailable"; title: string; orgName: string }
+  | {
+      state: "expired";
+      title: string;
+      orgName: string;
+      retentionUntil: string;
+      contactEmail: string | null;
+      contactPhone: string | null;
+    }
   | { state: "ok"; event: PublicEventInfo };
 
 /**
- * Resolves the public `/e/[slug]` state, distinguishing between a non-existent
- * slug (`not_found`), a suspended organization (`unavailable`), and an active
- * organization (`ok`).
+ * Resolves the public `/e/[slug]` state:
+ * - `not_found`: slug does not exist
+ * - `unavailable`: issuing organization is suspended
+ * - `expired`: event was released and `retention_until <= now()` ("this event has expired")
+ * - `ok`: event active (even if the organization's purchase has expired — public
+ *   downloads keep working until `retention_until`!)
  */
 export async function getPublicEventPageState(
   rawSlug: string,
@@ -117,6 +129,28 @@ export async function getPublicEventPageState(
     };
   }
 
+  const released = Boolean(row.released);
+  const retentionUntil =
+    typeof row.retention_until === "string" ? row.retention_until : null;
+  const contactEmail = (row.contact_email as string | null) ?? null;
+  const contactPhone = (row.contact_phone as string | null) ?? null;
+
+  if (
+    released &&
+    retentionUntil &&
+    !Number.isNaN(Date.parse(retentionUntil)) &&
+    Date.parse(retentionUntil) <= Date.now()
+  ) {
+    return {
+      state: "expired",
+      title: String(row.title ?? "Event"),
+      orgName: String(orgRel.name ?? "Organization"),
+      retentionUntil,
+      contactEmail,
+      contactPhone,
+    };
+  }
+
   const qrPosRaw = String(row.qr_position ?? "bottom-right");
   const qrPosition: QrPosition = [
     "bottom-right",
@@ -139,9 +173,10 @@ export async function getPublicEventPageState(
       subtitle: (row.subtitle as string | null) ?? null,
       slug: row.slug as string,
       eventDate: (row.event_date as string | null) ?? null,
-      contactEmail: (row.contact_email as string | null) ?? null,
-      contactPhone: (row.contact_phone as string | null) ?? null,
-      released: Boolean(row.released),
+      contactEmail,
+      contactPhone,
+      released,
+      retentionUntil,
       identifierLabel:
         (row.identifier_label as string) ?? "Registration number",
       requireNameMatch: Boolean(row.require_name_match),
@@ -159,10 +194,6 @@ export async function getPublicEventPageState(
   };
 }
 
-/**
- * Fetches public event metadata + active organization name by event slug.
- * Returns null if the event does not exist or its organization is suspended.
- */
 export async function getPublicEventBySlug(
   rawSlug: string,
 ): Promise<PublicEventInfo | null> {

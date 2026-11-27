@@ -1,74 +1,111 @@
-import CertificateForm from "./CertificateForm";
-import {
-  FOOTER_CREDIT_TEXT,
-  FOOTER_HELP_TEXT,
-  SEMINAR_SUBTITLE,
-  SEMINAR_TITLE,
-} from "@/lib/config";
-import { getReleased } from "@/lib/supabase";
+import Link from "next/link";
+import { getCurrentUser } from "@/lib/auth";
+import { getPricingAndPresets } from "@/lib/pricing-server";
+import LandingPricingCalculator from "./LandingPricingCalculator";
 
-// Release status can change at any time — always render on request.
+// Always compute prices dynamically from public.pricing_config without redeploying
 export const dynamic = "force-dynamic";
 
-// TODO(saas): this single-event page becomes a marketing landing page; the
-// attendee download form moves to the public event page (/e/[slug]) and
-// SEMINAR_TITLE / SEMINAR_SUBTITLE come from the event row.
-export default async function Home() {
-  // Checked on the server only. If the check fails (e.g. DB unreachable),
-  // fall back to showing the form; the API enforces the release flag anyway.
-  let released = true;
-  try {
-    released = await getReleased();
-  } catch (err) {
-    console.error("Failed to read release status:", err);
-  }
+export default async function HomePage() {
+  const [{ pricingConfig, presets }, user] = await Promise.all([
+    getPricingAndPresets(),
+    getCurrentUser(),
+  ]);
 
   return (
-    <main className="flex min-h-dvh flex-col items-center justify-between bg-gradient-to-b from-slate-50 to-slate-100 px-4 pt-10 pb-8 sm:py-12">
-      {/* Invisible spacer so the card stays vertically balanced on tall displays */}
-      <div className="hidden sm:block" aria-hidden="true" />
+    <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-100 text-slate-900">
+      {/* Top Navbar */}
+      <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur-xs">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-base font-bold text-white shadow-xs">
+              📜
+            </span>
+            <div>
+              <span className="block text-sm font-bold tracking-tight text-slate-900">
+                cert-saas
+              </span>
+              <span className="block text-[11px] font-medium text-slate-500">
+                Verified Digital Certificates
+              </span>
+            </div>
+          </div>
 
-      {/* Main card section */}
-      <div className="w-full max-w-md my-auto">
-        <header className="mb-8 text-center">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-600">
-            {SEMINAR_SUBTITLE}
-          </p>
-          <h1 className="mt-2 text-2xl font-bold leading-tight text-slate-900 sm:text-3xl">
-            {SEMINAR_TITLE}
+          <div className="flex items-center gap-3">
+            {user ? (
+              <Link
+                href="/dashboard"
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+              >
+                Open Dashboard →
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  href="/signup"
+                  className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  Create Organization
+                </Link>
+              </>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="mx-auto max-w-6xl space-y-16 px-4 py-12 sm:px-6 sm:py-16">
+        {/* Hero */}
+        <section className="mx-auto max-w-3xl text-center">
+          <span className="inline-flex items-center rounded-full bg-indigo-50 px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-indigo-700 ring-1 ring-indigo-200">
+            Built for Universities, Societies &amp; Conferences
+          </span>
+          <h1 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900 sm:text-5xl">
+            Issue tamper-evident PDF certificates in minutes
           </h1>
-        </header>
+          <p className="mt-4 text-base leading-relaxed text-slate-600 sm:text-lg">
+            Upload your custom PDF or image design, import up to 5,000 attendees
+            from CSV or Excel, stamp instant verification QR codes, and share a
+            fast self-service download portal.
+          </p>
 
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
-          {released ? <CertificateForm /> : <ComingSoon />}
+          <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+            <Link
+              href={user ? "/dashboard" : "/signup"}
+              className="rounded-xl bg-indigo-600 px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-indigo-700"
+            >
+              {user ? "Go to Dashboard →" : "Create Organization Account →"}
+            </Link>
+            <a
+              href="#pricing"
+              className="rounded-xl border border-slate-300 bg-white px-6 py-3 text-sm font-semibold text-slate-800 transition hover:bg-slate-50"
+            >
+              Calculate Pricing
+            </a>
+          </div>
         </section>
-      </div>
 
-      {/* Centered two-line footer */}
-      <footer className="mt-8 text-center space-y-1.5 pb-2">
-        <p className="text-sm font-medium text-slate-600">
-          {FOOTER_HELP_TEXT}
-        </p>
-        <p className="text-xs text-slate-400">
-          {FOOTER_CREDIT_TEXT}
+        {/* Live Pricing Section */}
+        <section id="pricing" className="scroll-mt-8">
+          <LandingPricingCalculator
+            pricingConfig={pricingConfig}
+            presets={presets}
+            isSignedIn={Boolean(user)}
+          />
+        </section>
+      </main>
+
+      <footer className="border-t border-slate-200 bg-white py-8 text-center text-xs text-slate-500">
+        <p>
+          cert-saas · Multi-tenant E-Certificate &amp; QR Verification Platform
         </p>
       </footer>
-    </main>
-  );
-}
-
-function ComingSoon() {
-  return (
-    <div className="py-6 text-center">
-      <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50 text-2xl">
-        ⏳
-      </div>
-      <p className="text-lg font-semibold text-slate-900">
-        Certificates will be available soon.
-      </p>
-      <p className="mt-2 text-sm text-slate-600">
-        Please check back later.
-      </p>
     </div>
   );
 }

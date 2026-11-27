@@ -336,7 +336,7 @@ export const DownloadsExportQuerySchema = z.object({
     .enum(["all", "downloaded", "not_downloaded"])
     .optional()
     .default("downloaded"),
-  format: z.enum(["csv", "xlsx"]).optional().default("csv"),
+  format: z.enum(["csv", "xlsx"]).optional() .default("csv"),
   certTypeId: z
     .union([UuidSchema, z.literal("")])
     .optional()
@@ -366,14 +366,14 @@ export const PublicDownloadBodySchema = z.object({
 });
 
 // -----------------------------------------------------------------------------
-// Billing & Superadmin Schemas
+// Billing, Packages, Top-ups & Superadmin Schemas
 // -----------------------------------------------------------------------------
 export const PaymentUpgradeFieldsSchema = z.object({
   planId: z
     .string()
     .trim()
     .toLowerCase()
-    .regex(/^[a-z0-9_-]{2,32}$/, "Please select a valid plan."),
+    .regex(/^[a-z0-9_-]{2,32}$/, "Please select a valid preset."),
   paymentMethod: z.enum(["bank", "jazzcash", "easypaisa"], {
     message: "Payment method must be Bank Transfer, JazzCash, or Easypaisa.",
   }),
@@ -384,11 +384,64 @@ export const PaymentUpgradeFieldsSchema = z.object({
     .max(120, "Transaction reference / TID must be between 2 and 120 characters."),
 });
 
+export const PurchaseRequestFieldsSchema = z.object({
+  selectionType: z.enum(["preset", "custom"]).default("preset"),
+  planId: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9_-]{2,32}$/)
+    .optional()
+    .or(z.literal("")),
+  events: z.coerce.number().int().min(1).max(20).optional(),
+  certsPerEvent: z.coerce.number().int().min(25).max(500).optional(),
+  months: z.coerce.number().int().optional(),
+  paymentMethod: z.enum(["bank", "jazzcash", "easypaisa"], {
+    message: "Payment method must be Bank Transfer, JazzCash, or Easypaisa.",
+  }),
+  transactionReference: z
+    .string()
+    .trim()
+    .min(2, "Transaction reference / TID must be between 2 and 120 characters.")
+    .max(120, "Transaction reference / TID must be between 2 and 120 characters."),
+  paymentNote: z.string().trim().max(500).optional().default(""),
+});
+
+export const CertificateTopupFieldsSchema = z.object({
+  eventId: UuidSchema,
+  certsAdded: z.coerce
+    .number()
+    .int()
+    .min(25, "Minimum top-up is 25 certificates.")
+    .max(5000, "Maximum single top-up is 5,000 certificates."),
+  paymentMethod: z.enum(["bank", "jazzcash", "easypaisa"], {
+    message: "Payment method must be Bank Transfer, JazzCash, or Easypaisa.",
+  }),
+  transactionReference: z
+    .string()
+    .trim()
+    .min(2, "Transaction reference / TID must be between 2 and 120 characters.")
+    .max(120, "Transaction reference / TID must be between 2 and 120 characters."),
+  paymentNote: z.string().trim().max(500).optional().default(""),
+});
+
 export const ReviewPaymentActionSchema = z.object({
   requestId: UuidSchema,
   decision: z.enum(["approved", "rejected"]),
   reviewerNote: z.string().trim().max(500).optional(),
   billingDays: z.number().int().min(1).max(3660).optional(),
+});
+
+export const ReviewPurchaseActionSchema = z.object({
+  purchaseId: UuidSchema,
+  decision: z.enum(["approved", "rejected"]),
+  note: z.string().trim().max(500).optional(),
+});
+
+export const ReviewTopupActionSchema = z.object({
+  topupId: UuidSchema,
+  decision: z.enum(["approved", "rejected"]),
+  note: z.string().trim().max(500).optional(),
 });
 
 export const SuperAdminSuspendSchema = z.object({
@@ -408,8 +461,25 @@ export const SuperAdminChangePlanSchema = z.object({
   reason: z.string().trim().max(500).optional(),
 });
 
+export const SuperAdminGrantPackageSchema = z.object({
+  orgId: UuidSchema,
+  planId: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9_-]{2,32}$/)
+    .optional()
+    .or(z.literal("")),
+  eventsTotal: z.coerce.number().int().min(1).max(100),
+  certsPerEvent: z.coerce.number().int().min(25).max(5000),
+  months: z.union([z.literal(3), z.literal(6), z.literal(12)]),
+  isPilot: z.boolean().default(false),
+  note: z.string().trim().max(500).optional(),
+});
+
 export const SuperAdminExtendExpirySchema = z.object({
   orgId: UuidSchema,
+  purchaseId: UuidSchema.optional(),
   addDays: z.number().int().min(1).max(3660).optional(),
   exactDate: z
     .string()
@@ -419,4 +489,33 @@ export const SuperAdminExtendExpirySchema = z.object({
     .or(z.literal("")),
   clearExpiry: z.boolean().optional(),
   reason: z.string().trim().max(500).optional(),
+});
+
+export const SuperAdminPricingConfigSchema = z.object({
+  eventFeePkr: z.coerce.number().int().min(0).max(1_000_000),
+  certRatePkr: z.coerce.number().int().min(0).max(100_000),
+  roundingPkr: z.coerce.number().int().min(1).max(10_000),
+  minEvents: z.coerce.number().int().min(1).max(20),
+  maxEvents: z.coerce.number().int().min(1).max(100),
+  minCertsPerEvent: z.coerce.number().int().min(1).max(500),
+  maxCertsPerEvent: z.coerce.number().int().min(25).max(10_000),
+  certsStep: z.coerce.number().int().min(1).max(500),
+  volumeDiscounts: z
+    .array(
+      z.object({
+        min_events: z.coerce.number().int().min(1).max(100),
+        discount: z.coerce.number().min(0).max(0.95),
+      }),
+    )
+    .min(1)
+    .max(20),
+  durationMultipliers: z
+    .array(
+      z.object({
+        months: z.coerce.number().int().min(1).max(60),
+        mult: z.coerce.number().min(0.1).max(10),
+      }),
+    )
+    .min(1)
+    .max(10),
 });

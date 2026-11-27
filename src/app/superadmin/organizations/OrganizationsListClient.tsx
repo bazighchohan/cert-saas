@@ -4,8 +4,8 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, ConfirmDialog, useToast } from "@/components/ui";
-import type { PlanDetails } from "@/lib/dashboard-data";
 import { isPlanExpired } from "@/lib/plan-enforcement-helpers";
+import type { PricedPlanPreset } from "@/lib/pricing";
 import {
   filterSuperAdminOrganizations,
   type SuperAdminOrgRow,
@@ -27,10 +27,9 @@ function formatDate(iso: string | null): string {
 
 export default function OrganizationsListClient({
   organizations,
-  plans,
 }: {
   organizations: SuperAdminOrgRow[];
-  plans: PlanDetails[];
+  presets?: PricedPlanPreset[];
 }) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -77,7 +76,7 @@ export default function OrganizationsListClient({
       showToast(
         nextSuspended
           ? `Suspended "${confirmOrg.name}" — admin sessions and public pages blocked.`
-          : `Unsuspended "${confirmOrg.name}" — access restored.`,
+          : `Unsuspend "${confirmOrg.name}" — access restored.`,
         "success",
       );
       setConfirmOrg(null);
@@ -96,9 +95,9 @@ export default function OrganizationsListClient({
           Organizations ({organizations.length})
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          Search tenants, inspect plan &amp; certificate usage, check last admin
-          login, or suspend/unsuspend accounts. Impersonation is disabled by
-          platform policy.
+          Search tenants, inspect package status &amp; certificate usage, check
+          last admin login, or suspend/unsuspend accounts. Impersonation is
+          disabled by platform policy.
         </p>
       </div>
 
@@ -116,15 +115,18 @@ export default function OrganizationsListClient({
           <select
             value={planFilter}
             onChange={(e) => setPlanFilter(e.target.value)}
-            aria-label="Filter by plan"
+            aria-label="Filter by package kind"
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus:border-indigo-500 focus:outline-none"
           >
-            <option value="all">All Plans</option>
-            {plans.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
+            <option value="all">All Packages</option>
+            <option value="single">Single</option>
+            <option value="multi">Multi</option>
+            <option value="pro">Pro</option>
+            <option value="custom">Custom</option>
+            <option value="pilot">Pilot</option>
+            <option value="pending">Pending</option>
+            <option value="expired">Expired</option>
+            <option value="none">No Package</option>
           </select>
 
           <select
@@ -149,7 +151,7 @@ export default function OrganizationsListClient({
             <thead className="bg-slate-50/90 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-5 py-3.5">Organization</th>
-                <th className="px-5 py-3.5">Plan</th>
+                <th className="px-5 py-3.5">Package</th>
                 <th className="px-5 py-3.5">Status</th>
                 <th className="px-5 py-3.5 text-right">Events</th>
                 <th className="px-5 py-3.5 text-right">Certificates Issued</th>

@@ -13,19 +13,27 @@ import {
   type DataTableColumn,
 } from "@/components/ui";
 import { createEventAction } from "@/app/dashboard/events/actions";
-import type { EventSummaryRow } from "@/lib/dashboard-data";
+import type {
+  CreateEventBlockInfo,
+  EventSummaryRow,
+} from "@/lib/dashboard-data";
 import { slugifyEventTitle, validateEventSlug } from "@/lib/event-validation";
+import { formatExpiryCountdown } from "@/lib/pricing";
 
 export default function EventsListClient({
   events,
-  eventsUsed,
-  maxEvents,
-  planName,
+  eventsSlotsUsed,
+  eventsSlotsTotal,
+  soonestActiveExpiry,
+  packageLabel,
+  createEventBlock,
 }: {
   events: EventSummaryRow[];
-  eventsUsed: number;
-  maxEvents: number | null;
-  planName: string;
+  eventsSlotsUsed: number;
+  eventsSlotsTotal: number;
+  soonestActiveExpiry: string | null;
+  packageLabel: string;
+  createEventBlock: CreateEventBlockInfo | null;
 }) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -40,9 +48,11 @@ export default function EventsListClient({
   const [contactPhone, setContactPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [isPlanLimitError, setIsPlanLimitError] = useState(false);
+  const [showBillingLink, setShowBillingLink] = useState(false);
 
-  const atLimit = maxEvents !== null && eventsUsed >= maxEvents;
+  const expiryInfo = soonestActiveExpiry
+    ? formatExpiryCountdown(soonestActiveExpiry)
+    : null;
 
   function openCreateModal() {
     setTitle("");
@@ -52,14 +62,8 @@ export default function EventsListClient({
     setEventDate("");
     setContactEmail("");
     setContactPhone("");
-    setFormError(
-      atLimit
-        ? `Your organization has reached the ${planName} plan limit of ${maxEvents} event${
-            maxEvents === 1 ? "" : "s"
-          } (${eventsUsed}/${maxEvents} used). Upgrade your plan in Billing to create more events.`
-        : null,
-    );
-    setIsPlanLimitError(atLimit);
+    setFormError(createEventBlock ? createEventBlock.message : null);
+    setShowBillingLink(Boolean(createEventBlock));
     setCreateModalOpen(true);
   }
 
@@ -80,7 +84,7 @@ export default function EventsListClient({
   async function handleCreateSubmit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
-    setIsPlanLimitError(false);
+    setShowBillingLink(false);
 
     const check = validateEventSlug(slug);
     if (!check.valid) {
@@ -101,12 +105,17 @@ export default function EventsListClient({
 
       if (res.error) {
         setFormError(res.error);
-        setIsPlanLimitError(res.code === "PLAN_LIMIT_REACHED");
+        setShowBillingLink(
+          res.code === "NO_ACTIVE_PURCHASE" ||
+            res.code === "PURCHASE_PENDING" ||
+            res.code === "NO_EVENT_SLOTS" ||
+            res.code === "PURCHASE_EXPIRED",
+        );
         showToast(res.error, "error");
         return;
       }
 
-      showToast("Event created!", "success");
+      showToast("Event created (1 package slot consumed)!", "success");
       setCreateModalOpen(false);
       if (res.eventId) {
         router.push(`/dashboard/events/${res.eventId}`);
@@ -149,6 +158,18 @@ export default function EventsListClient({
       ),
     },
     {
+      key: "certificates",
+      header: "Certificates",
+      render: (row) => {
+        const used = row.certificatesIssuedCount ?? row.attendeeCount;
+        return (
+          <span className="font-mono text-xs font-semibold text-slate-800">
+            {used} / {row.maxCertificates} certificates
+          </span>
+        );
+      },
+    },
+    {
       key: "eventDate",
       header: "Date",
       render: (row) => (
@@ -158,20 +179,25 @@ export default function EventsListClient({
       ),
     },
     {
-      key: "attendees",
-      header: "Attendees",
-      render: (row) => (
-        <span className="font-medium text-slate-800">{row.attendeeCount}</span>
-      ),
-    },
-    {
       key: "status",
       header: "Status",
       render: (row) =>
         row.released ? (
-          <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
-            Released
-          </span>
+          <div>
+            <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+              Released
+            </span>
+            {row.retentionUntil && (
+              <p className="mt-0.5 text-[10px] text-slate-500">
+                Public until{" "}
+                {new Date(row.retentionUntil).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </p>
+            )}
+          </div>
         ) : (
           <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">
             Draft
@@ -195,7 +221,7 @@ export default function EventsListClient({
 
   return (
     <div className="space-y-6">
-      {/* Page header */}
+      {/* Page header with usage meters ("1 / 3 events", "expires in 41 days") */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">
@@ -206,13 +232,16 @@ export default function EventsListClient({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           <span className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600">
-            Events used:{" "}
             <strong className="text-slate-900">
-              {eventsUsed} / {maxEvents ?? "∞"}
-            </strong>{" "}
-            ({planName})
+              {eventsSlotsUsed} / {eventsSlotsTotal} events
+            </strong>
+            {expiryInfo && expiryInfo.daysRemaining !== null ? (
+              <span className="text-slate-500"> · {expiryInfo.label}</span>
+            ) : (
+              <span className="text-slate-500"> · {packageLabel}</span>
+            )}
           </span>
           <Button variant="primary" onClick={openCreateModal}>
             + Create Event
@@ -220,22 +249,36 @@ export default function EventsListClient({
         </div>
       </div>
 
-      {/* Plan limit banner when at max_events */}
-      {atLimit && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50/90 px-5 py-3.5 text-xs text-amber-900">
+      {/* Clear package status banner when event creation is blocked */}
+      {createEventBlock && (
+        <div
+          className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-5 py-3.5 text-xs ${
+            createEventBlock.code === "PURCHASE_PENDING"
+              ? "border-amber-200 bg-amber-50/90 text-amber-950"
+              : createEventBlock.code === "PURCHASE_EXPIRED"
+                ? "border-red-200 bg-red-50/90 text-red-950"
+                : "border-indigo-200 bg-indigo-50/90 text-indigo-950"
+          }`}
+        >
           <div>
-            <strong>Plan limit reached:</strong> You have used{" "}
             <strong>
-              {eventsUsed} of {maxEvents}
+              {createEventBlock.code === "PURCHASE_PENDING"
+                ? "Waiting for approval:"
+                : createEventBlock.code === "NO_EVENT_SLOTS"
+                  ? "No event slots left:"
+                  : createEventBlock.code === "PURCHASE_EXPIRED"
+                    ? "Package expired:"
+                    : "Buy a package:"}
             </strong>{" "}
-            event{maxEvents === 1 ? "" : "s"} included in the{" "}
-            <strong>{planName}</strong> plan. Upgrade to Starter for up to 10 events and 500 certificates per event.
+            {createEventBlock.message}
           </div>
           <Link
             href="/dashboard/billing"
-            className="shrink-0 rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-800"
+            className="shrink-0 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800"
           >
-            Upgrade Plan →
+            {createEventBlock.code === "PURCHASE_PENDING"
+              ? "View Billing Status →"
+              : "Buy a Package →"}
           </Link>
         </div>
       )}
@@ -249,11 +292,20 @@ export default function EventsListClient({
           <EmptyState
             icon="🎓"
             title="No events yet"
-            description="Create your first event to upload a certificate template, add attendees via CSV or manually, and share a public download page."
+            description="Every event consumes 1 slot from an active package. Buy a package in Billing or use an available slot to create your first event."
             action={
-              <Button variant="primary" onClick={openCreateModal}>
-                Create your first event
-              </Button>
+              createEventBlock ? (
+                <Link
+                  href="/dashboard/billing"
+                  className="inline-flex items-center justify-center rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  Open Billing &amp; Packages →
+                </Link>
+              ) : (
+                <Button variant="primary" onClick={openCreateModal}>
+                  Create your first event
+                </Button>
+              )
             }
           />
         }
@@ -264,7 +316,7 @@ export default function EventsListClient({
         open={createModalOpen}
         onClose={() => !submitting && setCreateModalOpen(false)}
         title="Create a new event"
-        description="Set up your event details and public download URL slug."
+        description="Consumes 1 slot from your soonest-expiring active package and copies its certificate allowance."
         maxWidthClass="max-w-xl"
       >
         <form onSubmit={handleCreateSubmit} className="space-y-4">
@@ -344,12 +396,12 @@ export default function EventsListClient({
           {formError && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800">
               <p>{formError}</p>
-              {isPlanLimitError && (
+              {showBillingLink && (
                 <Link
                   href="/dashboard/billing"
                   className="mt-2 inline-block font-bold text-indigo-700 underline"
                 >
-                  View upgrade options in Billing →
+                  Open Billing &amp; Packages →
                 </Link>
               )}
             </div>
@@ -370,7 +422,10 @@ export default function EventsListClient({
               variant="primary"
               size="sm"
               loading={submitting}
-              disabled={Boolean(liveSlugCheck && !liveSlugCheck.valid)}
+              disabled={
+                Boolean(createEventBlock) ||
+                Boolean(liveSlugCheck && !liveSlugCheck.valid)
+              }
             >
               Create Event
             </Button>

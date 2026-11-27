@@ -99,7 +99,7 @@ export default function DashboardShell({
                   {org.name}
                 </p>
                 <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700 ring-1 ring-indigo-200">
-                  {org.planId}
+                  {org.packageLabel}
                 </span>
               </div>
               <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
@@ -181,7 +181,7 @@ export default function DashboardShell({
                     {org.name}
                   </span>
                   <span className="hidden rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-indigo-700 ring-1 ring-indigo-200 sm:inline-block">
-                    {org.planId} plan
+                    {org.packageLabel}
                   </span>
                 </div>
               </div>
@@ -226,7 +226,7 @@ export default function DashboardShell({
                         {user.email}
                       </p>
                       <p className="mt-1 inline-block rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
-                        {org.role} · {org.planId} plan
+                        {org.role} · {org.packageLabel}
                       </p>
                     </div>
                     <Link
@@ -262,21 +262,54 @@ export default function DashboardShell({
             </div>
           </header>
 
-          {/* Global Read-Only / Expiring-Soon Plan Banner */}
+          {/* Global Read-Only / Pending / Expiring-Soon Package Banner */}
           {org.isReadOnly && (
             <div className="border-b border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-900 sm:px-6 lg:px-8">
               <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
                 <span>
-                  <strong>Read-Only Mode:</strong> Your{" "}
-                  <span className="uppercase">{org.planId}</span> plan has
-                  expired. Viewing &amp; exports work and public certificate
-                  downloads remain live, but creating or editing is disabled.
+                  <strong>Read-Only Mode:</strong> Your package has expired.
+                  Viewing &amp; exports work and released public certificate
+                  downloads remain live until their retention date, but creating
+                  events or adding attendees is disabled.
                 </span>
                 <Link
                   href="/dashboard/billing"
                   className="font-bold text-red-950 underline hover:no-underline"
                 >
-                  Renew / Upgrade in Billing →
+                  Buy a Package in Billing →
+                </Link>
+              </div>
+            </div>
+          )}
+          {!org.isReadOnly && !org.hasActivePurchase && org.hasPendingPurchase && (
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
+                <span>
+                  <strong>Waiting for Approval:</strong> Your package purchase is
+                  pending verification. You can create and release events as soon
+                  as it is approved.
+                </span>
+                <Link
+                  href="/dashboard/billing"
+                  className="font-bold text-amber-950 underline hover:no-underline"
+                >
+                  View Purchase Status →
+                </Link>
+              </div>
+            </div>
+          )}
+          {!org.isReadOnly && !org.hasActivePurchase && !org.hasPendingPurchase && (
+            <div className="border-b border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs text-indigo-950 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
+                <span>
+                  <strong>No Active Package:</strong> Buy a package in Billing
+                  before creating or releasing events.
+                </span>
+                <Link
+                  href="/dashboard/billing"
+                  className="font-bold text-indigo-800 underline hover:no-underline"
+                >
+                  Buy a Package →
                 </Link>
               </div>
             </div>
@@ -285,9 +318,9 @@ export default function DashboardShell({
             <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 sm:px-6 lg:px-8">
               <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
                 <span>
-                  <strong>Plan Expiring Soon:</strong> Your{" "}
-                  <span className="uppercase">{org.planId}</span> plan expires
-                  soon. Renew ahead of time to avoid dashboard read-only mode.
+                  <strong>Package Expiring Soon:</strong> An active package
+                  expires within 14 days. Buy another package ahead of time to
+                  keep creating events without interruption.
                 </span>
                 <Link
                   href="/dashboard/billing"

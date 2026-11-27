@@ -1,226 +1,251 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  evaluatePlanEnforcement,
+  evaluatePurchasePlanEnforcement,
   isPlanEnforcementError,
   isPlanExpired,
   isPlanExpiringWithinDays,
   MAX_PAYMENT_PROOF_BYTES,
   PlanEnforcementError,
   validatePaymentProofBytes,
-  type PlanQuotaLimits,
+  type PurchaseSummarySnapshot,
 } from "../plan-enforcement-helpers";
 
-const FREE_PLAN: PlanQuotaLimits = {
-  id: "free",
-  name: "Free",
-  maxEvents: 1,
-  maxCertificatesPerEvent: 50,
-  maxCertificatesTotal: 50,
-  maxCertificateTypesPerEvent: 3,
-};
+function makePurchase(
+  overrides: Partial<PurchaseSummarySnapshot> = {},
+): PurchaseSummarySnapshot {
+  return {
+    id: overrides.id ?? "pur-1",
+    orgId: overrides.orgId ?? "org-a",
+    planId: overrides.planId ?? "multi-100",
+    kind: overrides.kind ?? "multi",
+    eventsTotal: overrides.eventsTotal ?? 3,
+    eventsUsed: overrides.eventsUsed ?? 0,
+    certsPerEvent: overrides.certsPerEvent ?? 100,
+    months: overrides.months ?? 3,
+    status: overrides.status ?? "active",
+    isPilot: overrides.isPilot ?? false,
+    startsAt: overrides.startsAt ?? "2026-11-01T00:00:00Z",
+    expiresAt: overrides.expiresAt ?? "2027-02-01T00:00:00Z",
+    createdAt: overrides.createdAt ?? "2026-11-01T00:00:00Z",
+  };
+}
 
-const STARTER_PLAN: PlanQuotaLimits = {
-  id: "starter",
-  name: "Starter",
-  maxEvents: 10,
-  maxCertificatesPerEvent: 500,
-  maxCertificatesTotal: 5000,
-  maxCertificateTypesPerEvent: 10,
-};
-
-const PRO_PLAN: PlanQuotaLimits = {
-  id: "pro",
-  name: "Pro",
-  maxEvents: null,
-  maxCertificatesPerEvent: 5000,
-  maxCertificatesTotal: null,
-  maxCertificateTypesPerEvent: null,
-};
-
-describe("evaluatePlanEnforcement (quotas, read-only expiration, suspension)", () => {
+describe("evaluatePurchasePlanEnforcement (packages, slots, max_certificates, expiry, suspension)", () => {
   const NOW = Date.parse("2026-11-26T00:00:00Z");
 
-  it("enforces max_events, max_certificate_types_per_event, max_certificates_per_event, and max_certificates_total", () => {
-    // 1. Free plan with 0 events allows creating 1st event
-    assert.doesNotThrow(() =>
-      evaluatePlanEnforcement(
-        {
-          orgStatus: "active",
-          planExpiresAt: null,
-          plan: FREE_PLAN,
-          eventsUsed: 0,
-        },
-        "event",
-        NOW,
-      ),
-    );
-
-    // 2. Free plan with 1 event blocks 2nd event with PLAN_LIMIT_REACHED
+  it("blocks organizations with no purchase ('buy a package'), pending purchase ('waiting for approval'), and exhausted slots ('no event slots left')", () => {
+    // 1. No purchase -> NO_ACTIVE_PURCHASE ("buy a package")
     assert.throws(
       () =>
-        evaluatePlanEnforcement(
-          {
-            orgStatus: "active",
-            planExpiresAt: null,
-            plan: FREE_PLAN,
-            eventsUsed: 1,
-          },
-          "event",
-          NOW,
-        ),
-      (err: unknown) =>
-        isPlanEnforcementError(err) && err.code === "PLAN_LIMIT_REACHED",
-    );
-
-    // 3. After upgrading to Starter (max 10 events) or Pro (unlimited), creating 2nd event succeeds
-    assert.doesNotThrow(() =>
-      evaluatePlanEnforcement(
-        {
-          orgStatus: "active",
-          planExpiresAt: "2026-12-26T00:00:00Z",
-          plan: STARTER_PLAN,
-          eventsUsed: 1,
-        },
-        "event",
-        NOW,
-      ),
-    );
-    assert.doesNotThrow(() =>
-      evaluatePlanEnforcement(
-        {
-          orgStatus: "active",
-          planExpiresAt: "2026-12-26T00:00:00Z",
-          plan: PRO_PLAN,
-          eventsUsed: 250,
-        },
-        "event",
-        NOW,
-      ),
-    );
-
-    // 4. Certificate types per event limit
-    assert.throws(
-      () =>
-        evaluatePlanEnforcement(
-          {
-            orgStatus: "active",
-            planExpiresAt: null,
-            plan: FREE_PLAN,
-            eventTypesUsed: 3,
-          },
-          { kind: "certificate_type", eventId: "ev-1", add: 1 },
-          NOW,
-        ),
-      (err: unknown) =>
-        isPlanEnforcementError(err) && err.code === "PLAN_LIMIT_REACHED",
-    );
-
-    // 5. Per-event certificates & total certificates across events
-    assert.throws(
-      () =>
-        evaluatePlanEnforcement(
-          {
-            orgStatus: "active",
-            planExpiresAt: null,
-            plan: FREE_PLAN,
-            eventAttendeesUsed: 49,
-            eventCertificatesUsed: 49,
-            totalCertificatesUsed: 49,
-          },
-          {
-            kind: "import",
-            eventId: "ev-1",
-            addAttendees: 2,
-            addCertificates: 2,
-          },
-          NOW,
-        ),
-      (err: unknown) =>
-        isPlanEnforcementError(err) && err.code === "PLAN_LIMIT_REACHED",
-    );
-
-    // Total certificates across events exceeded even when single event has room
-    assert.throws(
-      () =>
-        evaluatePlanEnforcement(
-          {
-            orgStatus: "active",
-            planExpiresAt: "2026-12-26T00:00:00Z",
-            plan: STARTER_PLAN,
-            eventAttendeesUsed: 10,
-            eventCertificatesUsed: 10,
-            totalCertificatesUsed: 4995,
-          },
-          {
-            kind: "certificate",
-            eventId: "ev-2",
-            addCertificates: 10,
-          },
+        evaluatePurchasePlanEnforcement(
+          { orgId: "org-a", orgStatus: "active", purchases: [] },
+          null,
+          "create_event",
           NOW,
         ),
       (err: unknown) =>
         isPlanEnforcementError(err) &&
-        err.code === "PLAN_LIMIT_REACHED" &&
-        /across all events/i.test(err.message),
+        err.code === "NO_ACTIVE_PURCHASE" &&
+        /buy a package/i.test(err.message),
+    );
+
+    // 2. Pending purchase -> PURCHASE_PENDING ("waiting for approval")
+    assert.throws(
+      () =>
+        evaluatePurchasePlanEnforcement(
+          {
+            orgId: "org-a",
+            orgStatus: "active",
+            purchases: [makePurchase({ status: "pending", expiresAt: null })],
+          },
+          null,
+          "create_event",
+          NOW,
+        ),
+      (err: unknown) =>
+        isPlanEnforcementError(err) &&
+        err.code === "PURCHASE_PENDING" &&
+        /waiting for approval/i.test(err.message),
+    );
+
+    // 3. Exhausted slots -> NO_EVENT_SLOTS ("no event slots left")
+    assert.throws(
+      () =>
+        evaluatePurchasePlanEnforcement(
+          {
+            orgId: "org-a",
+            orgStatus: "active",
+            purchases: [makePurchase({ eventsTotal: 3, eventsUsed: 3 })],
+          },
+          null,
+          "create_event",
+          NOW,
+        ),
+      (err: unknown) =>
+        isPlanEnforcementError(err) &&
+        err.code === "NO_EVENT_SLOTS" &&
+        /no event slots left/i.test(err.message),
     );
   });
 
-  it("places expired plans into read-only mode (blocks all writes/creates with PLAN_EXPIRED)", () => {
-    const expiredIso = "2026-11-25T23:59:59Z"; // 1 second before NOW
-    assert.equal(isPlanExpired(expiredIso, NOW), true);
-    assert.equal(isPlanExpired("2026-11-26T00:00:01Z", NOW), false);
-    assert.equal(isPlanExpired(null, NOW), false);
+  it("stacks two purchases and prefers the active purchase that expires soonest", () => {
+    const laterPurchase = makePurchase({
+      id: "pur-later",
+      certsPerEvent: 200,
+      eventsTotal: 3,
+      eventsUsed: 0,
+      expiresAt: "2027-06-01T00:00:00Z",
+    });
+    const soonerPurchase = makePurchase({
+      id: "pur-sooner",
+      certsPerEvent: 50,
+      eventsTotal: 1,
+      eventsUsed: 0,
+      expiresAt: "2026-12-15T00:00:00Z",
+    });
 
-    // Expiring within 7 days helper
-    assert.equal(
-      isPlanExpiringWithinDays("2026-11-30T00:00:00Z", 7, NOW),
-      true,
+    const chosen1 = evaluatePurchasePlanEnforcement(
+      {
+        orgId: "org-a",
+        orgStatus: "active",
+        purchases: [laterPurchase, soonerPurchase],
+      },
+      null,
+      "create_event",
+      NOW,
     );
-    assert.equal(
-      isPlanExpiringWithinDays("2026-12-15T00:00:00Z", 7, NOW),
-      false,
+    assert.equal(chosen1.purchase.id, "pur-sooner");
+    assert.equal(chosen1.maxCertificates, 50);
+
+    // Once soonerPurchase has 1/1 used, next event falls through to laterPurchase!
+    const chosen2 = evaluatePurchasePlanEnforcement(
+      {
+        orgId: "org-a",
+        orgStatus: "active",
+        purchases: [laterPurchase, { ...soonerPurchase, eventsUsed: 1 }],
+      },
+      null,
+      "create_event",
+      NOW,
     );
-    assert.equal(isPlanExpiringWithinDays(expiredIso, 7, NOW), false);
+    assert.equal(chosen2.purchase.id, "pur-later");
+    assert.equal(chosen2.maxCertificates, 200);
+  });
 
-    // Expired Starter plan with plenty of unused quota still blocks writes & creates
-    for (const resource of [
-      "write",
-      "event",
-      { kind: "attendee", eventId: "ev-1", addAttendees: 1, addCertificates: 1 },
-    ] as const) {
-      assert.throws(
-        () =>
-          evaluatePlanEnforcement(
-            {
-              orgStatus: "active",
-              planExpiresAt: expiredIso,
-              plan: STARTER_PLAN,
-              eventsUsed: 0,
-              eventAttendeesUsed: 0,
-              eventCertificatesUsed: 0,
-              totalCertificatesUsed: 0,
-            },
-            resource,
-            NOW,
-          ),
-        (err: unknown) =>
-          err instanceof PlanEnforcementError &&
-          err.code === "PLAN_EXPIRED" &&
-          err.httpStatus === 402 &&
-          /read-only mode/i.test(err.message),
-      );
-    }
+  it("enforces per-event max_certificates and cross-org purchase isolation", () => {
+    const orgAPurchase = makePurchase({ id: "pur-a", orgId: "org-a" });
 
-    // Suspended org blocks with ORG_SUSPENDED (403)
+    // Org B cannot consume Org A's purchase
     assert.throws(
       () =>
-        evaluatePlanEnforcement(
+        evaluatePurchasePlanEnforcement(
           {
-            orgStatus: "suspended",
-            planExpiresAt: null,
-            plan: FREE_PLAN,
+            orgId: "org-b",
+            orgStatus: "active",
+            purchases: [orgAPurchase],
           },
+          null,
+          "create_event",
+          NOW,
+        ),
+      (err: unknown) =>
+        isPlanEnforcementError(err) && err.code === "NO_ACTIVE_PURCHASE",
+    );
+
+    // Event with maxCertificates = 50 allows adding 2 certs at 48 used, blocks adding 3
+    assert.doesNotThrow(() =>
+      evaluatePurchasePlanEnforcement(
+        {
+          orgId: "org-a",
+          orgStatus: "active",
+          purchases: [orgAPurchase],
+          event: {
+            id: "ev-1",
+            orgId: "org-a",
+            purchaseId: "pur-a",
+            maxCertificates: 50,
+            attendeesUsed: 48,
+            certificatesUsed: 48,
+          },
+        },
+        "ev-1",
+        { kind: "import", addAttendees: 2, addCertificates: 2 },
+        NOW,
+      ),
+    );
+
+    assert.throws(
+      () =>
+        evaluatePurchasePlanEnforcement(
+          {
+            orgId: "org-a",
+            orgStatus: "active",
+            purchases: [orgAPurchase],
+            event: {
+              id: "ev-1",
+              orgId: "org-a",
+              purchaseId: "pur-a",
+              maxCertificates: 50,
+              attendeesUsed: 48,
+              certificatesUsed: 48,
+            },
+          },
+          "ev-1",
+          { kind: "import", addAttendees: 3, addCertificates: 3 },
+          NOW,
+        ),
+      (err: unknown) =>
+        isPlanEnforcementError(err) && err.code === "PLAN_LIMIT_REACHED",
+    );
+  });
+
+  it("blocks writes & attendee additions when purchase expires, and blocks suspended orgs", () => {
+    const expiredIso = "2026-11-25T23:59:59Z";
+    assert.equal(isPlanExpired(expiredIso, NOW), true);
+    assert.equal(
+      isPlanExpiringWithinDays("2026-12-05T00:00:00Z", 14, NOW),
+      true,
+    );
+
+    const expiredPurchase = makePurchase({
+      id: "pur-exp",
+      expiresAt: expiredIso,
+    });
+
+    assert.throws(
+      () =>
+        evaluatePurchasePlanEnforcement(
+          {
+            orgId: "org-a",
+            orgStatus: "active",
+            purchases: [expiredPurchase],
+            event: {
+              id: "ev-1",
+              orgId: "org-a",
+              purchaseId: "pur-exp",
+              maxCertificates: 100,
+              attendeesUsed: 10,
+              certificatesUsed: 10,
+            },
+          },
+          "ev-1",
+          { kind: "attendee", addAttendees: 1, addCertificates: 1 },
+          NOW,
+        ),
+      (err: unknown) =>
+        err instanceof PlanEnforcementError && err.code === "PURCHASE_EXPIRED",
+    );
+
+    assert.throws(
+      () =>
+        evaluatePurchasePlanEnforcement(
+          {
+            orgId: "org-a",
+            orgStatus: "suspended",
+            purchases: [makePurchase()],
+          },
+          null,
           "write",
           NOW,
         ),
@@ -264,12 +289,9 @@ describe("validatePaymentProofBytes", () => {
       extension: "pdf",
     });
 
-    // Reject spoofed HTML/script disguised as image/png
     const spoofed = new TextEncoder().encode("<script>alert(1)</script>");
-    const spoofRes = validatePaymentProofBytes(spoofed, "image/png");
-    assert.equal(spoofRes.valid, false);
+    assert.equal(validatePaymentProofBytes(spoofed, "image/png").valid, false);
 
-    // Reject empty and > 5 MB
     assert.equal(validatePaymentProofBytes(new Uint8Array(0)).valid, false);
     const oversized = new Uint8Array(MAX_PAYMENT_PROOF_BYTES + 1);
     oversized.set(png, 0);
