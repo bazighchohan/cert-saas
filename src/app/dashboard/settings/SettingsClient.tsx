@@ -3,11 +3,12 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Button, Input, useToast } from "@/components/ui";
+import { Button, Input, Modal, useToast } from "@/components/ui";
 import type { OrgUsageSummary } from "@/lib/dashboard-data";
 import { formatExpiryCountdown } from "@/lib/pricing";
 import {
   changePasswordAction,
+  deleteOrganizationAction,
   updateOrganizationNameAction,
 } from "./actions";
 
@@ -35,6 +36,34 @@ export default function SettingsClient({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+
+  const [deleteOrgOpen, setDeleteOrgOpen] = useState(false);
+  const [confirmOrgSlug, setConfirmOrgSlug] = useState("");
+  const [deletingOrg, setDeletingOrg] = useState(false);
+  const [deleteOrgError, setDeleteOrgError] = useState<string | null>(null);
+
+  async function handleDeleteOrganization(e: FormEvent) {
+    e.preventDefault();
+    setDeleteOrgError(null);
+    setDeletingOrg(true);
+
+    try {
+      const res = await deleteOrganizationAction({
+        confirmSlug: confirmOrgSlug,
+      });
+      if (res.error) {
+        setDeleteOrgError(res.error);
+        return;
+      }
+      setDeleteOrgOpen(false);
+      router.push(res.redirectTo || "/");
+      router.refresh();
+    } catch {
+      setDeleteOrgError("Failed to delete organization.");
+    } finally {
+      setDeletingOrg(false);
+    }
+  }
 
   async function handleSaveOrgName(e: FormEvent) {
     e.preventDefault();
@@ -281,6 +310,94 @@ export default function SettingsClient({
           </div>
         </form>
       </section>
+
+      {/* 4. Danger Zone: Delete My Organization */}
+      <section className="rounded-2xl border border-red-200 bg-white p-6 shadow-xs sm:p-8">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-base font-bold text-red-700">
+              Delete My Organization
+            </h2>
+            <p className="mt-1 max-w-xl text-xs leading-relaxed text-slate-600">
+              Permanently deletes <strong>{org.name}</strong>, all events,
+              attendee lists, issued certificates, uploaded template files,
+              payment receipts, download logs, and audit logs. This action
+              cannot be undone.
+            </p>
+          </div>
+
+          <Button
+            variant="danger"
+            disabled={org.role !== "owner"}
+            onClick={() => {
+              setConfirmOrgSlug("");
+              setDeleteOrgError(null);
+              setDeleteOrgOpen(true);
+            }}
+          >
+            Delete my organization
+          </Button>
+        </div>
+        {org.role !== "owner" && (
+          <p className="mt-2 text-xs text-slate-500">
+            Only the organization owner can permanently delete this workspace.
+          </p>
+        )}
+      </section>
+
+      <Modal
+        open={deleteOrgOpen}
+        onClose={() => !deletingOrg && setDeleteOrgOpen(false)}
+        title="Delete your organization permanently?"
+        description="Removes your organization, events, attendees, templates, payment files, and logs."
+        maxWidthClass="max-w-md"
+      >
+        <form onSubmit={handleDeleteOrganization} className="space-y-4">
+          <p className="text-xs leading-relaxed text-slate-600">
+            To confirm permanent deletion of{" "}
+            <strong className="text-slate-900">{org.name}</strong>, type your
+            organization slug{" "}
+            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-bold text-slate-900">
+              {org.slug}
+            </code>{" "}
+            below:
+          </p>
+
+          <Input
+            id="confirm-delete-org-slug"
+            placeholder={org.slug}
+            value={confirmOrgSlug}
+            onChange={(e) => setConfirmOrgSlug(e.target.value)}
+            autoFocus
+            required
+            disabled={deletingOrg}
+            error={deleteOrgError}
+          />
+
+          <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 pt-3">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setDeleteOrgOpen(false)}
+              disabled={deletingOrg}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="danger"
+              size="sm"
+              loading={deletingOrg}
+              disabled={
+                confirmOrgSlug.trim().toLowerCase() !== org.slug.toLowerCase()
+              }
+            >
+              Permanently Delete Organization
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

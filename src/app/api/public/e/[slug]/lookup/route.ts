@@ -9,6 +9,10 @@ import {
   normalizeForLookup,
 } from "@/lib/public-event";
 import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
+import {
+  SAMPLE_ATTENDEES,
+  SAMPLE_EVENT_SLUG,
+} from "@/lib/sample-event";
 import { EventSlugParamSchema, PublicLookupBodySchema } from "@/lib/schemas";
 import { parseValidatedJson } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -153,6 +157,46 @@ export async function POST(
         code: "BAD_REQUEST",
       },
       { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  if (slug === SAMPLE_EVENT_SLUG) {
+    const sampleAtt = SAMPLE_ATTENDEES.find(
+      (a) => normalizeForLookup(a.identifier) === normId,
+    );
+    if (!sampleAtt) {
+      return NextResponse.json(
+        { error: GENERIC_LOOKUP_ERROR, code: "NOT_FOUND" },
+        { status: 404, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    const token = createPublicLookupToken({
+      orgId: event.orgId,
+      eventId: event.id,
+      slug: event.slug,
+      attendeeId: sampleAtt.id,
+      identifierLower: normId,
+    });
+
+    return NextResponse.json(
+      {
+        attendeeName: sampleAtt.fullName,
+        identifier: sampleAtt.identifier,
+        token,
+        certificates: sampleAtt.certificates.map((c) => ({
+          attendeeCertificateId: c.attendeeCertificateId,
+          certificateTypeId: c.certificateTypeId,
+          key: c.key,
+          label: c.label,
+          pageWidthPt: 841.89,
+          pageHeightPt: 595.28,
+          downloadCount: 0,
+          downloadLimit: null,
+          limitReached: false,
+        })),
+      },
+      { headers: { "Cache-Control": "no-store" } },
     );
   }
 

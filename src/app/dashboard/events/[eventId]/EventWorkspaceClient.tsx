@@ -12,6 +12,7 @@ import {
 } from "@/components/ui";
 import {
   deleteEventAction,
+  deleteEventDataAction,
   updateEventOverviewAction,
   updateEventSettingsAction,
 } from "@/app/dashboard/events/actions";
@@ -93,6 +94,40 @@ export default function EventWorkspaceClient({
   const [confirmSlug, setConfirmSlug] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Purge event data confirmation modal state
+  const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [confirmPurgeSlug, setConfirmPurgeSlug] = useState("");
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState<string | null>(null);
+
+  async function handleConfirmPurgeData(e: FormEvent) {
+    e.preventDefault();
+    setPurgeError(null);
+    setPurging(true);
+    try {
+      const res = await deleteEventDataAction({
+        eventId: event.id,
+        confirmSlug: confirmPurgeSlug,
+      });
+      if (res.error) {
+        setPurgeError(res.error);
+        return;
+      }
+      setReleased(false);
+      setPurgeModalOpen(false);
+      setConfirmPurgeSlug("");
+      showToast(
+        "Deleted all attendees, template files, and download logs for this event.",
+        "success",
+      );
+      router.refresh();
+    } catch {
+      setPurgeError("Failed to delete event data.");
+    } finally {
+      setPurging(false);
+    }
+  }
 
   const liveSlugCheck = validateEventSlug(slug);
 
@@ -753,16 +788,42 @@ export default function EventWorkspaceClient({
             </section>
           </form>
 
-          {/* Danger Zone: Delete Event with typed confirmation */}
-          <section className="rounded-2xl border border-red-200 bg-white p-6 shadow-xs sm:p-8">
+          {/* Danger Zone: Delete Event Data / Delete Event with typed confirmation */}
+          <section className="space-y-5 rounded-2xl border border-red-200 bg-white p-6 shadow-xs sm:p-8">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-red-100 pb-5">
+              <div>
+                <h2 className="text-base font-bold text-red-700">
+                  Delete This Event&apos;s Data
+                </h2>
+                <p className="mt-1 max-w-xl text-xs text-slate-600">
+                  Removes all <strong>{event.attendeeCount}</strong> attendee(s),
+                  issued certificates, uploaded template files, and download
+                  logs for <strong>{event.title}</strong> while keeping the
+                  event shell and URL slug intact.
+                </p>
+              </div>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setConfirmPurgeSlug("");
+                  setPurgeError(null);
+                  setPurgeModalOpen(true);
+                }}
+              >
+                Delete this event&apos;s data
+              </Button>
+            </div>
+
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
                 <h2 className="text-base font-bold text-red-700">
-                  Delete Event
+                  Delete Entire Event
                 </h2>
                 <p className="mt-1 max-w-xl text-xs text-slate-600">
-                  Permanently deletes <strong>{event.title}</strong>, including all{" "}
-                  <strong>{event.attendeeCount}</strong> attendee(s), issued certificates, uploaded template files, and download logs. This action cannot be undone.
+                  Permanently deletes <strong>{event.title}</strong>, including
+                  its URL slug, all attendees, issued certificates, uploaded
+                  template files, and download logs. This action cannot be
+                  undone.
                 </p>
               </div>
               <Button
@@ -779,6 +840,59 @@ export default function EventWorkspaceClient({
           </section>
         </div>
       )}
+
+      {/* Typed confirmation modal: Delete this event's data */}
+      <Modal
+        open={purgeModalOpen}
+        onClose={() => !purging && setPurgeModalOpen(false)}
+        title="Delete this event's data?"
+        description="Removes all attendees, issued certificates, template files, and download logs."
+        maxWidthClass="max-w-md"
+      >
+        <form onSubmit={handleConfirmPurgeData} className="space-y-4">
+          <p className="text-xs leading-relaxed text-slate-600">
+            To permanently erase all attendees, files, and logs for{" "}
+            <strong className="text-slate-900">{event.title}</strong>, type the
+            event slug{" "}
+            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-bold text-slate-900">
+              {event.slug}
+            </code>{" "}
+            below:
+          </p>
+
+          <Input
+            id="confirm-purge-slug"
+            placeholder={event.slug}
+            value={confirmPurgeSlug}
+            onChange={(e) => setConfirmPurgeSlug(e.target.value)}
+            autoFocus
+            required
+            disabled={purging}
+            error={purgeError}
+          />
+
+          <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 pt-3">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setPurgeModalOpen(false)}
+              disabled={purging}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="danger"
+              size="sm"
+              loading={purging}
+              disabled={confirmPurgeSlug.trim().toLowerCase() !== event.slug}
+            >
+              Delete Event Data
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Typed confirmation delete modal */}
       <Modal

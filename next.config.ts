@@ -2,18 +2,31 @@ import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV === "development";
 
+let analyticsOrigin = "";
+if (
+  (process.env.ANALYTICS_ENABLED === "true" ||
+    process.env.NEXT_PUBLIC_ANALYTICS_ENABLED === "true") &&
+  process.env.NEXT_PUBLIC_ANALYTICS_SRC
+) {
+  try {
+    analyticsOrigin = ` ${new URL(process.env.NEXT_PUBLIC_ANALYTICS_SRC).origin}`;
+  } catch {
+    analyticsOrigin = "";
+  }
+}
+
 // Content Security Policy:
 // - Allows Next.js runtime scripts/styles + pdfjs-dist worker (`blob:`) + data/blob previews
-// - Restricts network connections (`connect-src`) to same-origin and Supabase HTTPS endpoints
+// - Restricts network connections (`connect-src`) to same-origin, Supabase HTTPS endpoints, and optional cookie-free analytics origin
 // - Blocks <object>/<embed>, framing (`frame-ancestors 'none'`), base-tag hijacking, and cross-origin form posts
 const cspDirectives = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}${analyticsOrigin}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' blob: data:",
   "font-src 'self' data:",
   "worker-src 'self' blob:",
-  "connect-src 'self' https://*.supabase.co",
+  `connect-src 'self' https://*.supabase.co${analyticsOrigin}`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

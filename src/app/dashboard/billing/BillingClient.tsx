@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Input, Modal, useToast } from "@/components/ui";
+import PricingCardsSection from "@/components/pricing/PricingCardsSection";
 import type { BillingDashboardData } from "@/lib/dashboard-data";
 import {
   computePrice,
@@ -184,9 +185,16 @@ export default function BillingClient({
   function openBuyModal(opts?: {
     mode?: "preset" | "custom";
     presetId?: string;
+    events?: number;
+    certsPerEvent?: number;
+    months?: number;
   }) {
     if (opts?.mode) setSelectionType(opts.mode);
     if (opts?.presetId) setSelectedPresetId(opts.presetId);
+    if (typeof opts?.events === "number") setCustomEvents(opts.events);
+    if (typeof opts?.certsPerEvent === "number")
+      setCustomCerts(opts.certsPerEvent);
+    if (typeof opts?.months === "number") setCustomMonths(opts.months);
     setBuyTxRef("");
     setBuyNote("");
     setBuyScreenshot(null);
@@ -525,7 +533,29 @@ export default function BillingClient({
         )}
       </section>
 
-      {/* 2. Preset Packages Comparison */}
+      {/* 2. Buy Another Package (Shared 4-Card Pricing Component) */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8">
+        <PricingCardsSection
+          pricingConfig={pricingConfig}
+          presets={presets}
+          isSignedIn={true}
+          showPilotBanner={false}
+          onSelectPlan={(choice) => {
+            if (choice.selectionType === "preset") {
+              openBuyModal({ mode: "preset", presetId: choice.planId });
+            } else {
+              openBuyModal({
+                mode: "custom",
+                events: choice.events,
+                certsPerEvent: choice.certsPerEvent,
+                months: choice.months,
+              });
+            }
+          }}
+        />
+      </section>
+
+      {/* 2b. Preset Packages Comparison */}
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
         <div className="border-b border-slate-100 px-6 py-5">
           <h2 className="text-base font-bold text-slate-900">

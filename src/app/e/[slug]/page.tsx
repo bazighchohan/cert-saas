@@ -140,6 +140,42 @@ export default async function PublicEventPage({
           )}
         </header>
 
+        {/* Sample Event Demo Credentials Banner */}
+        {event.slug === "sample-event" && (
+          <aside
+            aria-label="Sample demo credentials"
+            className="mx-auto max-w-xl rounded-2xl border border-indigo-200 bg-indigo-50/80 p-4 text-xs text-slate-800 shadow-2xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-bold text-indigo-900">
+                ✨ Interactive Sample Event — Try entering:
+              </p>
+              <a
+                href="/"
+                className="font-semibold text-indigo-700 underline hover:text-indigo-900"
+              >
+                ← Back to CertSaaS Home
+              </a>
+            </div>
+            <ul className="mt-2 space-y-1 text-slate-700">
+              <li>
+                • Registration ID{" "}
+                <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-indigo-900 ring-1 ring-indigo-200">
+                  DEMO-001
+                </code>{" "}
+                — Ayesha Khan (2 certificates: Participation + Award)
+              </li>
+              <li>
+                • Registration ID{" "}
+                <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-indigo-900 ring-1 ring-indigo-200">
+                  DEMO-002
+                </code>{" "}
+                — Bilal Ahmed (1 certificate)
+              </li>
+            </ul>
+          </aside>
+        )}
+
         {/* Main Content: Friendly "Not Available Yet" vs Lookup/Download Portal */}
         {!event.released ? (
           <section

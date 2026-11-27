@@ -2,6 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import {
+  executeEventDataPurge,
+  filterSafeOrgPaths,
+} from "@/lib/data-deletion";
 import { validateEventSlug } from "@/lib/event-validation";
 import {
   assertWithinPlan,
@@ -9,6 +13,7 @@ import {
   type PlanErrorCode,
 } from "@/lib/plan-enforcement";
 import {
+  DeleteEventDataSchema,
   DeleteEventSchema,
   EventDetailsInputSchema,
   UpdateEventOverviewSchema,
@@ -22,10 +27,10 @@ export interface EventActionResult {
   success?: boolean;
   error?: string;
   code?:
-    | PlanErrorCode
-    | "SLUG_TAKEN"
-    | "VALIDATION_ERROR"
-    | "NOT_FOUND";
+  | PlanErrorCode
+  | "SLUG_TAKEN"
+  | "VALIDATION_ERROR"
+  | "NOT_FOUND";
   eventId?: string;
   slug?: string;
 }
@@ -528,6 +533,163 @@ export async function updateEventSettingsAction(
 }
 
 /**
+ * Deletes an event's data (all attendees, issued certificates, uploaded template
+ * files, top-up proof files, and download logs) while keeping the event shell.
+ * Requires typed confirmation matching the event slug. Allowed even when a
+ * package has expired so organizations always retain self-service erasure rights.
+ */
+export async function deleteEventDataAction(input: {
+  eventId: string;
+  confirmSlug: string;
+}): Promise<EventActionResult> {
+  const user = await getCurrentUser();
+  const org = await getCurrentOrg();
+  if (!user || !org) {
+    return { error: "You must be signed in to delete event data." };
+  }
+
+  const parsed = DeleteEventDataSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      code: "VALIDATION_ERROR",
+      error: formatZodError(parsed.error),
+    };
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: event } = await admin
+    .from("events")
+    .select("id, title, slug")
+    .eq("id", parsed.data.eventId)
+    .eq("org_id", org.id)
+    .maybeSingle();
+
+  if (!event) {
+    return { error: "Event not found.", code: "NOT_FOUND" };
+  }
+
+  if (parsed.data.confirmSlug.trim().toLowerCase() !== String(event.slug)) {
+    return {
+      code: "VALIDATION_ERROR",
+      error: `Please type "${event.slug}" to confirm deleting this event's data.`,
+    };
+  }
+
+  try {
+    await executeEventDataPurge({
+      orgId: org.id,
+      eventId: parsed.data.eventId,
+      actorUserId: user.id,
+      adapter: {
+        async getEventScopedPaths(orgId, eventId) {
+          const [ctRes, topRes] = await Promise.all([
+            admin
+              .from("certificate_types")
+              .select("template_path")
+              .eq("org_id", orgId)
+              .eq("event_id", eventId),
+            admin
+              .from("certificate_topups")
+              .select("screenshot_path")
+              .eq("org_id", orgId)
+              .eq("event_id", eventId),
+          ]);
+          return {
+            templatePaths: (ctRes.data ?? []).map(
+              (r) => (r.template_path as string | null) ?? "",
+            ),
+            proofPaths: (topRes.data ?? []).map(
+              (r) => (r.screenshot_path as string | null) ?? "",
+            ),
+          };
+        },
+        async removeStorageObjects(bucket, paths) {
+          try {
+            await admin.storage.from(bucket).remove(paths);
+          } catch {
+            // Non-fatal if bucket/object already absent
+          }
+        },
+        async purgeEventRows(orgId, eventId, actorUserId) {
+          // 1. Delete attendee_certificates (cascades download_log) & attendees
+          await admin
+            .from("attendee_certificates")
+            .delete()
+            .eq("org_id", orgId)
+            .eq("event_id", eventId);
+
+          const { count } = await admin
+            .from("attendees")
+            .delete({ count: "exact" })
+            .eq("org_id", orgId)
+            .eq("event_id", eventId);
+
+          // 2. Clear uploaded template references on certificate_types & unrelease event
+          await admin
+            .from("certificate_types")
+            .update({
+              template_path: null,
+              template_mime: null,
+              page_width_pt: null,
+              page_height_pt: null,
+              page_count: 1,
+              page_index: 0,
+            })
+            .eq("org_id", orgId)
+            .eq("event_id", eventId);
+
+          await admin
+            .from("events")
+            .update({ released: false, retention_until: null })
+            .eq("id", eventId)
+            .eq("org_id", orgId);
+
+          // 3. Remove event-scoped audit logs & record minimal erasure entry
+          await admin
+            .from("audit_log")
+            .delete()
+            .eq("org_id", orgId)
+            .contains("details", { event_id: eventId });
+
+          await admin.from("audit_log").insert({
+            org_id: orgId,
+            user_id: actorUserId,
+            action: "event.data_deleted",
+            details: {
+              event_id: eventId,
+              slug: event.slug,
+              attendees_deleted: count ?? 0,
+            },
+          });
+
+          return { attendeesDeleted: count ?? 0 };
+        },
+        async getOrgScopedPaths() {
+          return { templatePaths: [], proofPaths: [] };
+        },
+        async purgeOrganizationRows() {},
+      },
+    });
+  } catch (err) {
+    return {
+      error: sanitizeClientErrorMessage(
+        err,
+        "Failed to delete this event's data.",
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard", "layout");
+  revalidatePath(`/dashboard/events/${parsed.data.eventId}`);
+  revalidatePath(`/e/${event.slug as string}`);
+  return {
+    success: true,
+    eventId: parsed.data.eventId,
+    slug: event.slug as string,
+  };
+}
+
+/**
  * Deletes an event after verifying typed confirmation (must match the event slug).
  */
 export async function deleteEventAction(input: {
@@ -548,19 +710,9 @@ export async function deleteEventAction(input: {
     };
   }
 
-  try {
-    await assertWithinPlan(org.id, delParsed.data.eventId, "write");
-  } catch (err) {
-    if (isPlanEnforcementError(err)) {
-      return { code: err.code, error: err.message };
-    }
-    throw err;
-  }
-
-  const supabase = await createSupabaseServerClient();
   const admin = getSupabaseAdmin();
 
-  const { data: event } = await supabase
+  const { data: event } = await admin
     .from("events")
     .select("id, title, slug")
     .eq("id", delParsed.data.eventId)
@@ -578,15 +730,27 @@ export async function deleteEventAction(input: {
     };
   }
 
-  const { data: certTypes } = await supabase
-    .from("certificate_types")
-    .select("template_path")
-    .eq("org_id", org.id)
-    .eq("event_id", input.eventId);
+  const [ctRes, topRes] = await Promise.all([
+    admin
+      .from("certificate_types")
+      .select("template_path")
+      .eq("org_id", org.id)
+      .eq("event_id", input.eventId),
+    admin
+      .from("certificate_topups")
+      .select("screenshot_path")
+      .eq("org_id", org.id)
+      .eq("event_id", input.eventId),
+  ]);
 
-  const templatePaths = (certTypes ?? [])
-    .map((c) => c.template_path as string | null)
-    .filter((p): p is string => Boolean(p && p.startsWith(`${org.id}/`)));
+  const templatePaths = filterSafeOrgPaths(
+    org.id,
+    (ctRes.data ?? []).map((c) => c.template_path as string | null),
+  );
+  const proofPaths = filterSafeOrgPaths(
+    org.id,
+    (topRes.data ?? []).map((t) => t.screenshot_path as string | null),
+  );
 
   if (templatePaths.length > 0) {
     try {
@@ -595,25 +759,39 @@ export async function deleteEventAction(input: {
       // Bucket may not exist yet
     }
   }
+  if (proofPaths.length > 0) {
+    try {
+      await admin.storage.from("payment-proofs").remove(proofPaths);
+    } catch {
+      // Bucket may not exist yet
+    }
+  }
 
-  const { error: delErr } = await supabase
+  const { error: delErr } = await admin
     .from("events")
     .delete()
     .eq("id", input.eventId)
     .eq("org_id", org.id);
 
   if (delErr) {
-    return { error: sanitizeClientErrorMessage(delErr, "Failed to delete event.") };
+    return {
+      error: sanitizeClientErrorMessage(delErr, "Failed to delete event."),
+    };
   }
 
   try {
+    await admin
+      .from("audit_log")
+      .delete()
+      .eq("org_id", org.id)
+      .contains("details", { event_id: input.eventId });
+
     await admin.from("audit_log").insert({
       org_id: org.id,
       user_id: user.id,
       action: "event.deleted",
       details: {
         event_id: input.eventId,
-        title: event.title,
         slug: event.slug,
         removed_templates: templatePaths.length,
       },
@@ -623,5 +801,6 @@ export async function deleteEventAction(input: {
   }
 
   revalidatePath("/dashboard", "layout");
+  revalidatePath(`/e/${event.slug as string}`);
   return { success: true };
 }

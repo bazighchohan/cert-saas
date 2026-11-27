@@ -1,5 +1,6 @@
 import "server-only";
 
+import { findSampleCertificateByVerifyCode } from "@/lib/sample-event";
 import { VerifyCodeSchema } from "@/lib/schemas";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
@@ -33,6 +34,10 @@ export async function lookupCertificateByVerifyCode(
   }
 
   const code = parsed.data;
+  const sampleMatch = findSampleCertificateByVerifyCode(code);
+  if (sampleMatch) {
+    return { status: "valid", certificate: sampleMatch };
+  }
   const admin = getSupabaseAdmin();
 
   const { data, error } = await admin

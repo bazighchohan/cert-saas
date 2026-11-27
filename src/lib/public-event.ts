@@ -11,6 +11,10 @@ import {
   verifyLookupTokenWithSecret,
   type LookupTokenPayload,
 } from "@/lib/public-event-helpers";
+import {
+  SAMPLE_EVENT_SLUG,
+  SAMPLE_PUBLIC_EVENT,
+} from "@/lib/sample-event";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export {
@@ -99,6 +103,10 @@ export async function getPublicEventPageState(
   const slug = rawSlug.trim().toLowerCase();
   if (!slug || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
     return { state: "not_found" };
+  }
+
+  if (slug === SAMPLE_EVENT_SLUG) {
+    return { state: "ok", event: SAMPLE_PUBLIC_EVENT };
   }
 
   const admin = getSupabaseAdmin();

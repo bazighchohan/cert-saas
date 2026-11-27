@@ -157,6 +157,15 @@ export const DeleteEventSchema = z.object({
   confirmSlug: z.string().trim().min(1).max(100),
 });
 
+export const DeleteEventDataSchema = z.object({
+  eventId: UuidSchema,
+  confirmSlug: z.string().trim().min(1).max(100),
+});
+
+export const DeleteOrganizationSchema = z.object({
+  confirmSlug: z.string().trim().min(2).max(100),
+});
+
 export const UpdateOrgNameSchema = z.object({
   name: z
     .string()

@@ -10,6 +10,10 @@ import {
   verifyPublicLookupToken,
 } from "@/lib/public-event";
 import { clientIp, enforceRateLimit } from "@/lib/rate-limit";
+import {
+  SAMPLE_ATTENDEES,
+  SAMPLE_EVENT_SLUG,
+} from "@/lib/sample-event";
 import { EventSlugParamSchema, PublicDownloadBodySchema } from "@/lib/schemas";
 import { parseValidatedJson } from "@/lib/security";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -123,6 +127,59 @@ export async function POST(
       },
       { status: 403, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  if (slug === SAMPLE_EVENT_SLUG) {
+    const sampleAtt = SAMPLE_ATTENDEES.find((a) => a.id === payload.attendeeId);
+    const sampleCert = sampleAtt?.certificates.find(
+      (c) => c.attendeeCertificateId === attendeeCertificateId,
+    );
+    if (!sampleAtt || !sampleCert) {
+      return NextResponse.json(
+        { error: "Certificate not found.", code: "NOT_FOUND" },
+        { status: 404, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    const templateBytes = await fetchTemplateBytesFromStorage({
+      orgId: event.orgId,
+      eventId: event.id,
+      templatePath: null,
+    });
+    const appUrl =
+      process.env.NEXT_PUBLIC_APP_URL?.trim() &&
+      !process.env.NEXT_PUBLIC_APP_URL.includes(".supabase.co")
+        ? process.env.NEXT_PUBLIC_APP_URL.trim()
+        : req.nextUrl.origin;
+    const pdfBytes = await generateCertificate({
+      templateBytes,
+      fullName: sampleAtt.fullName,
+      verifyCode: sampleCert.verifyCode,
+      config: {
+        certificateType: sampleCert.certificateTypeRow,
+        orgName: event.orgName,
+        eventTitle: event.title,
+        showQr: event.showQr,
+        qrPosition: event.qrPosition,
+        qrSizePt: event.qrSizePt,
+        verifyBaseUrl: appUrl,
+      },
+    });
+    const filename = buildSafeCertificateFilename(
+      event.slug,
+      sampleCert.key,
+      sampleAtt.identifier,
+    );
+    return new NextResponse(Buffer.from(pdfBytes), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Content-Length": String(pdfBytes.byteLength),
+        "Cache-Control": "private, no-store",
+        "X-New-Download-Count": "1",
+      },
+    });
   }
 
   const admin = getSupabaseAdmin();

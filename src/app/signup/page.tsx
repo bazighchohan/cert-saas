@@ -1,12 +1,33 @@
 import "server-only";
 
+import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { getCurrentOrgResult, getCurrentUser } from "@/lib/auth";
+import {
+  parsePlanSelectionFromParams,
+  PLAN_SELECTION_COOKIE_NAME,
+  verifyPlanSelectionCookie,
+} from "@/lib/plan-selection-cookie";
 import { getPricingAndPresets } from "@/lib/pricing-server";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import SignupForm from "./SignupForm";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Request Organization Access",
+  description:
+    "Create your organization account, choose an event certificate package, and issue verified digital certificates online.",
+};
+
+function getCookieSecret(): string {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    "cert-saas-plan-cookie-fallback-secret"
+  );
+}
 
 export default async function SignupPage({
   searchParams,
@@ -30,62 +51,45 @@ export default async function SignupPage({
     redirect("/dashboard");
   }
 
-  const [{ pricingConfig, presets }, query] = await Promise.all([
+  const [{ pricingConfig, presets }, query, cookieStore] = await Promise.all([
     getPricingAndPresets(),
     searchParams,
+    cookies(),
   ]);
 
-  const rawPlan = (query.plan ?? "").trim().toLowerCase();
-  const matchedPreset = rawPlan
-    ? presets.find((p) => p.id === rawPlan)
-    : undefined;
+  const choiceFromQuery = parsePlanSelectionFromParams(
+    {
+      plan: query.plan,
+      events: query.events,
+      certs: query.certs,
+      months: query.months,
+    },
+    pricingConfig,
+    presets,
+  );
 
-  let initialPlanFromUrl:
-    | {
-        cameFromUrl: boolean;
-        selectionType: "preset" | "custom";
-        planId: string;
-        events: number;
-        certsPerEvent: number;
-        months: number;
+  const rawCookie = cookieStore.get(PLAN_SELECTION_COOKIE_NAME)?.value;
+  const choiceFromCookie = !choiceFromQuery
+    ? verifyPlanSelectionCookie(
+        rawCookie,
+        getCookieSecret(),
+        pricingConfig,
+        presets,
+      )
+    : null;
+
+  const resolvedChoice = choiceFromQuery ?? choiceFromCookie;
+
+  const initialSelection = resolvedChoice
+    ? {
+        cameFromUrl: true,
+        selectionType: resolvedChoice.selectionType,
+        planId: resolvedChoice.planId,
+        events: resolvedChoice.events,
+        certsPerEvent: resolvedChoice.certsPerEvent,
+        months: resolvedChoice.months,
       }
-    | undefined;
-
-  if (matchedPreset) {
-    initialPlanFromUrl = {
-      cameFromUrl: true,
-      selectionType: "preset",
-      planId: matchedPreset.id,
-      events: matchedPreset.eventsCount,
-      certsPerEvent: matchedPreset.certsPerEvent,
-      months: matchedPreset.months,
-    };
-  } else if (rawPlan === "custom") {
-    const parsedEvents = Math.min(
-      pricingConfig.maxEvents,
-      Math.max(pricingConfig.minEvents, Number(query.events) || 3),
-    );
-    const rawCerts = Number(query.certs) || 100;
-    const snappedCerts =
-      Math.round(rawCerts / pricingConfig.certsStep) * pricingConfig.certsStep;
-    const parsedCerts = Math.min(
-      pricingConfig.maxCertsPerEvent,
-      Math.max(pricingConfig.minCertsPerEvent, snappedCerts),
-    );
-    const rawMonths = Number(query.months) || 3;
-    const parsedMonths = pricingConfig.allowedMonths.includes(rawMonths)
-      ? rawMonths
-      : (pricingConfig.allowedMonths[0] ?? 3);
-
-    initialPlanFromUrl = {
-      cameFromUrl: true,
-      selectionType: "custom",
-      planId: presets[0]?.id ?? "single-50",
-      events: parsedEvents,
-      certsPerEvent: parsedCerts,
-      months: parsedMonths,
-    };
-  }
+    : undefined;
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center bg-slate-50 px-4 py-12">
@@ -107,7 +111,7 @@ export default async function SignupPage({
           <SignupForm
             pricingConfig={pricingConfig}
             presets={presets}
-            initialSelection={initialPlanFromUrl}
+            initialSelection={initialSelection}
           />
         </section>
       </div>

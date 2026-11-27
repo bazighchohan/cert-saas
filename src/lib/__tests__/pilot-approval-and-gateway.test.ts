@@ -68,6 +68,8 @@ describe("Feature flags & default provider selection", () => {
       requirePaymentProof: false,
       emailsEnabled: false,
       paymentGatewayEnabled: false,
+      pilotBannerEnabled: true,
+      analyticsEnabled: false,
     });
     assert.equal(isPaymentProofRequired({}), false);
     assert.equal(areEmailsEnabled({}), false);
