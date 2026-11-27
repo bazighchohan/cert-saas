@@ -1,15 +1,22 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import {
+  notifyCustomerOrganizationApproved,
+  notifyCustomerOrganizationRejected,
+} from "@/lib/notifications";
 import { computePrice } from "@/lib/pricing";
 import { getPricingAndPresets } from "@/lib/pricing-server";
 import {
   ReviewPaymentActionSchema,
   ReviewPurchaseActionSchema,
   ReviewTopupActionSchema,
+  SuperAdminApproveSignupRequestSchema,
   SuperAdminExtendExpirySchema,
   SuperAdminGrantPackageSchema,
+  SuperAdminPaymentSettingsSchema,
   SuperAdminPricingConfigSchema,
+  SuperAdminRejectSignupRequestSchema,
   SuperAdminSuspendSchema,
 } from "@/lib/schemas";
 import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
@@ -112,6 +119,7 @@ export async function setOrganizationSuspendedAction(input: {
   });
 
   revalidatePath("/superadmin", "layout");
+  revalidatePath("/pending");
   revalidatePath("/dashboard", "layout");
   revalidatePath("/e");
   return { success: true };
@@ -170,21 +178,21 @@ export async function superAdminGrantPackageAction(input: {
   let listPricePkr = 0;
   let discountPkr = 0;
   let finalPricePkr = 0;
-  if (!parsed.data.isPilot) {
-    try {
-      const calc = computePrice(
-        { events: eventsTotal, certsPerEvent, months },
-        pricingConfig,
-      );
-      listPricePkr = calc.listPricePkr;
-      discountPkr = calc.discountPkr;
-      finalPricePkr = calc.finalPricePkr;
-    } catch {
-      finalPricePkr =
-        eventsTotal *
-        (pricingConfig.eventFeePkr + pricingConfig.certRatePkr * certsPerEvent);
-      listPricePkr = finalPricePkr;
-    }
+  try {
+    const calc = computePrice(
+      { events: eventsTotal, certsPerEvent, months },
+      pricingConfig,
+    );
+    listPricePkr = calc.listPricePkr;
+    discountPkr = parsed.data.isPilot ? calc.listPricePkr : calc.discountPkr;
+    finalPricePkr = parsed.data.isPilot ? 0 : calc.finalPricePkr;
+  } catch {
+    const fallbackList =
+      eventsTotal *
+      (pricingConfig.eventFeePkr + pricingConfig.certRatePkr * certsPerEvent);
+    listPricePkr = fallbackList;
+    discountPkr = parsed.data.isPilot ? fallbackList : 0;
+    finalPricePkr = parsed.data.isPilot ? 0 : fallbackList;
   }
 
   const now = new Date();
@@ -204,6 +212,15 @@ export async function superAdminGrantPackageAction(input: {
       list_price_pkr: listPricePkr,
       discount_pkr: discountPkr,
       final_price_pkr: finalPricePkr,
+      price_snapshot: {
+        events: eventsTotal,
+        certs_per_event: certsPerEvent,
+        months,
+        list_price_pkr: listPricePkr,
+        discount_pkr: discountPkr,
+        final_price_pkr: finalPricePkr,
+        currency: "PKR",
+      },
       is_pilot: parsed.data.isPilot,
       payment_method: parsed.data.isPilot ? "pilot" : "manual",
       payment_note: parsed.data.note || null,
@@ -225,6 +242,8 @@ export async function superAdminGrantPackageAction(input: {
   await admin
     .from("organizations")
     .update({
+      status: "active",
+      rejection_reason: null,
       plan_id: matchedPreset ? matchedPreset.id : null,
       plan_expires_at: created.expires_at,
       plan_expiring_soon: false,
@@ -250,12 +269,13 @@ export async function superAdminGrantPackageAction(input: {
   });
 
   revalidatePath("/superadmin", "layout");
+  revalidatePath("/pending");
   revalidatePath("/dashboard", "layout");
   return { success: true };
 }
 
 /**
- * Extends expiry on an organization's active/latest purchase (and `organizations.plan_expires_at`).
+ * Extends expiry on an organization's active/latest purchase.
  */
 export async function extendOrganizationExpiryAction(input: {
   orgId: string;
@@ -420,13 +440,13 @@ export async function superAdminReviewPurchaseAction(input: {
   }
 
   revalidatePath("/superadmin", "layout");
+  revalidatePath("/pending");
   revalidatePath("/dashboard", "layout");
   return { success: true };
 }
 
 /**
  * Approves or rejects a `pending` certificate top-up (`public.certificate_topups`).
- * Approving atomically raises `events.max_certificates`.
  */
 export async function superAdminReviewTopupAction(input: {
   topupId: string;
@@ -491,9 +511,6 @@ export async function superAdminReviewTopupAction(input: {
 
 /**
  * Updates the single `public.pricing_config` row.
- * Accessible ONLY to users listed in `public.super_admins`.
- * Immediately updates all computed prices across landing, billing, and server
- * without requiring a deployment.
  */
 export async function superAdminUpdatePricingConfigAction(input: {
   eventFeePkr: number;
@@ -557,7 +574,6 @@ export async function superAdminUpdatePricingConfigAction(input: {
     };
   }
 
-  // Record audit log entry on superadmin's organization if they belong to one
   const { data: memRow } = await admin
     .from("organization_members")
     .select("org_id")
@@ -580,6 +596,7 @@ export async function superAdminUpdatePricingConfigAction(input: {
   }
 
   revalidatePath("/");
+  revalidatePath("/signup");
   revalidatePath("/dashboard/billing");
   revalidatePath("/superadmin", "layout");
   return { success: true };
@@ -623,5 +640,264 @@ export async function superAdminReviewPaymentAction(input: {
 
   revalidatePath("/superadmin", "layout");
   revalidatePath("/dashboard", "layout");
+  return { success: true };
+}
+
+/**
+ * Approves a pending signup request in `/superadmin/requests`:
+ * - `mode === "pilot"`: organization 'active', purchase 'active', `is_pilot = true`,
+ *   discount = full price (`final_price_pkr = 0`), `starts_at = now`, `expires_at = now + months`.
+ * - `mode === "paid"`: same with `is_pilot = false` and optional private `payment_note`.
+ * Idempotent, writes to `audit_log`, and gated strictly by `public.super_admins`.
+ */
+export async function superAdminApproveSignupRequestAction(input: {
+  orgId: string;
+  purchaseId: string;
+  mode: "pilot" | "paid";
+  paymentNote?: string;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: your account is not listed in public.super_admins.",
+    };
+  }
+
+  const parsed = SuperAdminApproveSignupRequestSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const admin = getSupabaseAdmin();
+
+  const { data: orgAndPur } = await admin
+    .from("purchases")
+    .select(
+      "id, org_id, kind, events_total, certs_per_event, months, organizations!inner(id, name, contact_name, contact_email)",
+    )
+    .eq("id", parsed.data.purchaseId)
+    .eq("org_id", parsed.data.orgId)
+    .maybeSingle();
+
+  if (!orgAndPur) {
+    return { error: "Organization signup purchase request not found." };
+  }
+
+  const isPilot = parsed.data.mode === "pilot";
+  const { data: rpcRows, error: rpcErr } = await admin.rpc(
+    "activate_purchase_and_organization",
+    {
+      p_purchase_id: parsed.data.purchaseId,
+      p_is_pilot: isPilot,
+      p_payment_note: parsed.data.paymentNote || null,
+      p_actor_user_id: superAdmin.id,
+      p_actor_label: superAdmin.email,
+      p_payment_method: isPilot ? "pilot" : "manual",
+    },
+  );
+
+  if (rpcErr) {
+    return {
+      error: sanitizeClientErrorMessage(
+        rpcErr,
+        "Failed to approve organization request.",
+      ),
+    };
+  }
+
+  const actRow = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | {
+        already_processed?: boolean;
+        expires_at?: string | null;
+      }
+    | undefined;
+
+  if (!actRow?.already_processed) {
+    const orgRel = Array.isArray(orgAndPur.organizations)
+      ? (orgAndPur.organizations[0] as Record<string, unknown> | undefined)
+      : (orgAndPur.organizations as Record<string, unknown> | undefined);
+    const toEmail =
+      typeof orgRel?.contact_email === "string" ? orgRel.contact_email : "";
+
+    if (toEmail) {
+      await notifyCustomerOrganizationApproved({
+        toEmail,
+        contactName:
+          typeof orgRel?.contact_name === "string" ? orgRel.contact_name : "",
+        orgName: String(orgRel?.name ?? ""),
+        isPilot,
+        planSummary: `${orgAndPur.events_total} event(s) × ${orgAndPur.certs_per_event} certs · ${orgAndPur.months} months`,
+        expiresAt: actRow?.expires_at ?? null,
+      });
+    }
+  }
+
+  revalidatePath("/superadmin", "layout");
+  revalidatePath("/pending");
+  revalidatePath("/dashboard", "layout");
+  return { success: true };
+}
+
+/**
+ * Rejects a pending signup request in `/superadmin/requests` with a required reason.
+ * Sets organization `'rejected'`, marks pending purchase `'rejected'`, writes `audit_log`.
+ * Idempotent and gated strictly by `public.super_admins`.
+ */
+export async function superAdminRejectSignupRequestAction(input: {
+  orgId: string;
+  purchaseId?: string;
+  reason: string;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: your account is not listed in public.super_admins.",
+    };
+  }
+
+  const parsed = SuperAdminRejectSignupRequestSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: orgRow } = await admin
+    .from("organizations")
+    .select("id, name, contact_name, contact_email")
+    .eq("id", parsed.data.orgId)
+    .maybeSingle();
+
+  if (!orgRow) {
+    return { error: "Organization not found." };
+  }
+
+  const { data: rpcRows, error: rpcErr } = await admin.rpc(
+    "reject_organization_signup_request",
+    {
+      p_org_id: parsed.data.orgId,
+      p_purchase_id: parsed.data.purchaseId ?? null,
+      p_reason: parsed.data.reason,
+      p_actor_user_id: superAdmin.id,
+      p_actor_label: superAdmin.email,
+    },
+  );
+
+  if (rpcErr) {
+    return {
+      error: sanitizeClientErrorMessage(
+        rpcErr,
+        "Failed to reject organization request.",
+      ),
+    };
+  }
+
+  const rejRow = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+    | { already_processed?: boolean }
+    | undefined;
+
+  if (
+    !rejRow?.already_processed &&
+    typeof orgRow.contact_email === "string" &&
+    orgRow.contact_email
+  ) {
+    await notifyCustomerOrganizationRejected({
+      toEmail: orgRow.contact_email,
+      contactName:
+        typeof orgRow.contact_name === "string" ? orgRow.contact_name : "",
+      orgName: String(orgRow.name ?? ""),
+      reason: parsed.data.reason,
+    });
+  }
+
+  revalidatePath("/superadmin", "layout");
+  revalidatePath("/pending");
+  revalidatePath("/dashboard", "layout");
+  return { success: true };
+}
+
+/**
+ * Updates `public.payment_settings` (Bank / JazzCash / Easypaisa instructions).
+ * Accessible ONLY to users listed in `public.super_admins`.
+ */
+export async function superAdminUpdatePaymentSettingsAction(input: {
+  bankEnabled: boolean;
+  bankName: string;
+  bankAccountTitle: string;
+  bankAccountNumber: string;
+  bankIban: string;
+  jazzcashEnabled: boolean;
+  jazzcashAccountTitle: string;
+  jazzcashNumber: string;
+  easypaisaEnabled: boolean;
+  easypaisaAccountTitle: string;
+  easypaisaNumber: string;
+  instructions: string;
+}): Promise<SuperAdminActionResult> {
+  const superAdmin = await getCurrentSuperAdmin();
+  if (!superAdmin) {
+    return {
+      error: "Forbidden: only super_admins can edit payment_settings.",
+    };
+  }
+
+  const parsed = SuperAdminPaymentSettingsSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: formatZodError(parsed.error) };
+  }
+
+  const d = parsed.data;
+  const admin = getSupabaseAdmin();
+
+  const { error: updErr } = await admin
+    .from("payment_settings")
+    .update({
+      bank_enabled: d.bankEnabled,
+      bank_name: d.bankName,
+      bank_account_title: d.bankAccountTitle,
+      bank_account_number: d.bankAccountNumber,
+      bank_iban: d.bankIban,
+      jazzcash_enabled: d.jazzcashEnabled,
+      jazzcash_account_title: d.jazzcashAccountTitle,
+      jazzcash_number: d.jazzcashNumber,
+      easypaisa_enabled: d.easypaisaEnabled,
+      easypaisa_account_title: d.easypaisaAccountTitle,
+      easypaisa_number: d.easypaisaNumber,
+      instructions: d.instructions,
+      updated_by: superAdmin.id,
+    })
+    .eq("id", true);
+
+  if (updErr) {
+    return {
+      error: sanitizeClientErrorMessage(
+        updErr,
+        "Failed to update payment settings.",
+      ),
+    };
+  }
+
+  const { data: memRow } = await admin
+    .from("organization_members")
+    .select("org_id")
+    .eq("user_id", superAdmin.id)
+    .limit(1)
+    .maybeSingle();
+
+  if (memRow?.org_id) {
+    await admin.from("audit_log").insert({
+      org_id: memRow.org_id,
+      user_id: superAdmin.id,
+      action: "superadmin.payment_settings_updated",
+      details: {
+        bank_enabled: d.bankEnabled,
+        jazzcash_enabled: d.jazzcashEnabled,
+        easypaisa_enabled: d.easypaisaEnabled,
+        superadmin_email: superAdmin.email,
+      },
+    });
+  }
+
+  revalidatePath("/superadmin/payment-settings");
+  revalidatePath("/dashboard/billing");
   return { success: true };
 }

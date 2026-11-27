@@ -23,6 +23,10 @@ export default async function AccountSuspendedPage() {
     redirect("/dashboard");
   }
 
+  if (org && org.status !== "suspended" && !isSuperAdmin) {
+    redirect("/pending");
+  }
+
   return (
     <main className="flex min-h-dvh items-center justify-center bg-slate-50 px-4 py-12 text-slate-900">
       <section

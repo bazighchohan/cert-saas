@@ -1,12 +1,38 @@
 import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
+import {
+  evaluateProxyAccessGate,
+  type GateOrgStatus,
+} from "@/lib/access-gate";
 import { verifySameOriginRequest } from "@/lib/security-helpers";
+
+function copySetCookies(from: NextResponse, to: NextResponse): NextResponse {
+  for (const cookie of from.cookies.getAll()) {
+    to.cookies.set(cookie);
+  }
+  return to;
+}
+
+function normalizeGateStatus(raw: unknown): GateOrgStatus | null {
+  if (
+    raw === "pending" ||
+    raw === "active" ||
+    raw === "rejected" ||
+    raw === "suspended"
+  ) {
+    return raw;
+  }
+  return null;
+}
 
 /**
  * Next.js 16 Proxy:
+ * - Enforces CSRF same-origin verification on cookie-authenticated API mutations.
  * - Refreshes the Supabase Auth session cookie via @supabase/ssr.
- * - Requires login for /dashboard/** (and legacy /admin/** and /api/admin/**).
- * - Redirects logged-in users visiting /login or /signup to /dashboard.
+ * - Enforces the pilot approval access gate: any logged-in user whose organization
+ *   is not 'active' is redirected from EVERY /dashboard route to /pending and
+ *   blocked with 403 on EVERY /api/dashboard route (super_admins are exempt).
  */
 export async function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
@@ -15,7 +41,6 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(new URL("/login", req.url));
   }
 
-  // Enforce CSRF same-origin verification on all cookie-authenticated API mutations
   const isCookieAuthenticatedApi =
     pathname.startsWith("/api/dashboard/") ||
     pathname.startsWith("/api/superadmin/") ||
@@ -50,6 +75,9 @@ export async function proxy(req: NextRequest) {
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   let isLoggedIn = false;
+  let isSuperAdmin = false;
+  let hasOrg = false;
+  let orgStatus: GateOrgStatus | null = null;
 
   if (url && anonKey) {
     const supabase = createServerClient(url, anonKey, {
@@ -75,45 +103,87 @@ export async function proxy(req: NextRequest) {
       data: { user },
     } = await supabase.auth.getUser();
     isLoggedIn = Boolean(user);
+
+    if (user) {
+      const { data: gateData, error: gateErr } = await supabase.rpc(
+        "get_my_access_gate_status",
+      );
+
+      if (!gateErr && gateData) {
+        const row = (Array.isArray(gateData) ? gateData[0] : gateData) as
+          | Record<string, unknown>
+          | undefined;
+        if (row) {
+          isSuperAdmin = Boolean(row.is_super_admin);
+          hasOrg = Boolean(row.has_org);
+          orgStatus = normalizeGateStatus(row.org_status);
+        }
+      } else if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
+        // Fallback if migration 014 RPC has not been applied yet in local dev
+        const adminClient = createClient(
+          url,
+          process.env.SUPABASE_SERVICE_ROLE_KEY,
+          { auth: { persistSession: false, autoRefreshToken: false } },
+        );
+        const [superRes, memRes] = await Promise.all([
+          adminClient
+            .from("super_admins")
+            .select("user_id")
+            .eq("user_id", user.id)
+            .maybeSingle(),
+          adminClient
+            .from("organization_members")
+            .select("organizations!inner(status)")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle(),
+        ]);
+        isSuperAdmin = Boolean(superRes.data?.user_id);
+        const orgRel = memRes.data?.organizations as
+          | { status?: string }
+          | Array<{ status?: string }>
+          | undefined;
+        const orgObj = Array.isArray(orgRel) ? orgRel[0] : orgRel;
+        if (orgObj) {
+          hasOrg = true;
+          orgStatus = normalizeGateStatus(orgObj.status);
+        }
+      }
+    }
   }
 
-  // Logged-in users visiting /login or /signup go straight to their requested destination or /dashboard.
-  if (isLoggedIn && (pathname === "/login" || pathname === "/signup")) {
-    const requestedNext = req.nextUrl.searchParams.get("next");
-    const safeDest =
-      requestedNext &&
-      requestedNext.startsWith("/") &&
-      !requestedNext.startsWith("//")
-        ? requestedNext
-        : "/dashboard";
-    return NextResponse.redirect(new URL(safeDest, req.url));
-  }
+  const decision = evaluateProxyAccessGate({
+    pathname,
+    search,
+    isLoggedIn,
+    isSuperAdmin,
+    hasOrg,
+    orgStatus,
+    requestedNext: req.nextUrl.searchParams.get("next"),
+  });
 
-  const isProtectedPage =
-    pathname === "/dashboard" ||
-    pathname.startsWith("/dashboard/") ||
-    pathname === "/superadmin" ||
-    pathname.startsWith("/superadmin/") ||
-    pathname === "/admin" ||
-    pathname.startsWith("/admin/");
-
-  const isProtectedApi =
-    ((pathname === "/api/admin" || pathname.startsWith("/api/admin/")) &&
-      pathname !== "/api/admin/logout") ||
-    pathname.startsWith("/api/dashboard/") ||
-    pathname.startsWith("/api/superadmin/");
-
-  if (!isLoggedIn && isProtectedApi) {
-    return NextResponse.json(
-      { error: "Unauthorized", code: "UNAUTHORIZED" },
-      { status: 401, headers: { "Cache-Control": "no-store" } },
+  if (decision.action === "redirect") {
+    const redirectRes = NextResponse.redirect(
+      new URL(decision.destination, req.url),
     );
+    return copySetCookies(res, redirectRes);
   }
 
-  if (!isLoggedIn && isProtectedPage) {
-    const login = new URL("/login", req.url);
-    login.searchParams.set("next", pathname + search);
-    return NextResponse.redirect(login);
+  if (decision.action === "json_error") {
+    const jsonRes = NextResponse.json(
+      {
+        error: decision.error,
+        code: decision.code,
+        ...(decision.orgStatus ? { status: decision.orgStatus } : {}),
+        ...(decision.redirectTo ? { redirectTo: decision.redirectTo } : {}),
+      },
+      {
+        status: decision.httpStatus,
+        headers: { "Cache-Control": "no-store" },
+      },
+    );
+    return copySetCookies(res, jsonRes);
   }
 
   return res;
@@ -121,6 +191,7 @@ export async function proxy(req: NextRequest) {
 
 export const config = {
   matcher: [
+    "/pending",
     "/dashboard",
     "/dashboard/:path*",
     "/superadmin",

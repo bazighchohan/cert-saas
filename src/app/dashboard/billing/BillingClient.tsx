@@ -110,6 +110,8 @@ export default function BillingClient({
     events,
     topups,
     isSuperAdmin,
+    requirePaymentProof,
+    paymentSettings,
   } = data;
 
   // Buy Package Modal state
@@ -211,13 +213,15 @@ export default function BillingClient({
     e.preventDefault();
     setBuyError(null);
 
-    if (buyTxRef.trim().length < 2) {
-      setBuyError("Please enter your transaction reference / TID.");
-      return;
-    }
-    if (!buyScreenshot) {
-      setBuyError("Please upload your payment receipt screenshot or PDF.");
-      return;
+    if (requirePaymentProof) {
+      if (buyTxRef.trim().length < 2) {
+        setBuyError("Please enter your transaction reference / TID.");
+        return;
+      }
+      if (!buyScreenshot) {
+        setBuyError("Please upload your payment receipt screenshot or PDF.");
+        return;
+      }
     }
 
     setBuySubmitting(true);
@@ -231,10 +235,14 @@ export default function BillingClient({
         fd.set("certsPerEvent", String(customCerts));
         fd.set("months", String(customMonths));
       }
-      fd.set("paymentMethod", buyMethod);
-      fd.set("transactionReference", buyTxRef.trim());
       fd.set("paymentNote", buyNote.trim());
-      fd.set("screenshot", buyScreenshot);
+      if (requirePaymentProof) {
+        fd.set("paymentMethod", buyMethod);
+        fd.set("transactionReference", buyTxRef.trim());
+        if (buyScreenshot) {
+          fd.set("screenshot", buyScreenshot);
+        }
+      }
 
       const res = await fetch("/api/dashboard/billing/purchases", {
         method: "POST",
@@ -272,13 +280,15 @@ export default function BillingClient({
       setTopupError("Please choose an event to top up.");
       return;
     }
-    if (topupTxRef.trim().length < 2) {
-      setTopupError("Please enter your transaction reference / TID.");
-      return;
-    }
-    if (!topupScreenshot) {
-      setTopupError("Please upload your payment receipt screenshot or PDF.");
-      return;
+    if (requirePaymentProof) {
+      if (topupTxRef.trim().length < 2) {
+        setTopupError("Please enter your transaction reference / TID.");
+        return;
+      }
+      if (!topupScreenshot) {
+        setTopupError("Please upload your payment receipt screenshot or PDF.");
+        return;
+      }
     }
 
     setTopupSubmitting(true);
@@ -286,10 +296,14 @@ export default function BillingClient({
       const fd = new FormData();
       fd.set("eventId", topupEventId);
       fd.set("certsAdded", String(topupCertsAdded));
-      fd.set("paymentMethod", topupMethod);
-      fd.set("transactionReference", topupTxRef.trim());
       fd.set("paymentNote", topupNote.trim());
-      fd.set("screenshot", topupScreenshot);
+      if (requirePaymentProof) {
+        fd.set("paymentMethod", topupMethod);
+        fd.set("transactionReference", topupTxRef.trim());
+        if (topupScreenshot) {
+          fd.set("screenshot", topupScreenshot);
+        }
+      }
 
       const res = await fetch("/api/dashboard/billing/topups", {
         method: "POST",
@@ -920,63 +934,108 @@ export default function BillingClient({
               · {livePackagePricing.months} months ({livePackagePricing.durationMultiplier}×)
             </p>
             <p className="mt-2 text-[11px] text-indigo-800">
-              {METHOD_META[buyMethod].instructions}
+              {requirePaymentProof
+                ? paymentSettings.instructions || METHOD_META[buyMethod].instructions
+                : "Submit your package request below — our team will confirm with you on WhatsApp and activate your slots."}
             </p>
           </div>
 
-          {/* Payment Method */}
-          <div className="grid grid-cols-3 gap-2">
-            {(["bank", "jazzcash", "easypaisa"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setBuyMethod(m)}
-                className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
-                  buyMethod === m
-                    ? "border-indigo-600 bg-indigo-50 text-indigo-700"
-                    : "border-slate-200 bg-white text-slate-700"
-                }`}
-              >
-                {m === "bank"
-                  ? "Bank Transfer"
-                  : m === "jazzcash"
-                    ? "JazzCash"
-                    : "Easypaisa"}
-              </button>
-            ))}
-          </div>
+          {requirePaymentProof && (
+            <>
+              {/* Payment Method */}
+              <div className="grid grid-cols-3 gap-2">
+                {(["bank", "jazzcash", "easypaisa"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setBuyMethod(m)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
+                      buyMethod === m
+                        ? "border-indigo-600 bg-indigo-50 text-indigo-700"
+                        : "border-slate-200 bg-white text-slate-700"
+                    }`}
+                  >
+                    {m === "bank"
+                      ? "Bank Transfer"
+                      : m === "jazzcash"
+                        ? "JazzCash"
+                        : "Easypaisa"}
+                  </button>
+                ))}
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                {buyMethod === "bank" && (
+                  <p>
+                    <strong>{paymentSettings.bankName}</strong> ·{" "}
+                    {paymentSettings.bankAccountTitle} · Acc:{" "}
+                    <span className="font-mono">
+                      {paymentSettings.bankAccountNumber}
+                    </span>
+                    {paymentSettings.bankIban
+                      ? ` · IBAN: ${paymentSettings.bankIban}`
+                      : ""}
+                  </p>
+                )}
+                {buyMethod === "jazzcash" && (
+                  <p>
+                    <strong>JazzCash</strong> ·{" "}
+                    {paymentSettings.jazzcashAccountTitle} ·{" "}
+                    <span className="font-mono">
+                      {paymentSettings.jazzcashNumber}
+                    </span>
+                  </p>
+                )}
+                {buyMethod === "easypaisa" && (
+                  <p>
+                    <strong>Easypaisa</strong> ·{" "}
+                    {paymentSettings.easypaisaAccountTitle} ·{" "}
+                    <span className="font-mono">
+                      {paymentSettings.easypaisaNumber}
+                    </span>
+                  </p>
+                )}
+              </div>
+
+              <Input
+                label="Transaction Reference / TID *"
+                placeholder="e.g. 084920194821 or STAN-449102"
+                value={buyTxRef}
+                onChange={(e) => setBuyTxRef(e.target.value)}
+                required
+                disabled={buySubmitting}
+              />
+            </>
+          )}
 
           <Input
-            label="Transaction Reference / TID *"
-            placeholder="e.g. 084920194821 or STAN-449102"
-            value={buyTxRef}
-            onChange={(e) => setBuyTxRef(e.target.value)}
-            required
-            disabled={buySubmitting}
-          />
-
-          <Input
-            label="Optional Payment Note"
-            placeholder="e.g. Sent from HBL account ending 4812"
+            label="Optional Note"
+            placeholder={
+              requirePaymentProof
+                ? "e.g. Sent from HBL account ending 4812"
+                : "e.g. Needed for upcoming semester convocation"
+            }
             value={buyNote}
             onChange={(e) => setBuyNote(e.target.value)}
             disabled={buySubmitting}
           />
 
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-700">
-              Payment Receipt Screenshot (PNG, JPG, WebP, or PDF — max 5 MB) *
-            </label>
-            <input
-              ref={buyFileRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,application/pdf"
-              required
-              disabled={buySubmitting}
-              onChange={(e) => setBuyScreenshot(e.target.files?.[0] ?? null)}
-              className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs"
-            />
-          </div>
+          {requirePaymentProof && (
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">
+                Payment Receipt Screenshot (PNG, JPG, WebP, or PDF — max 5 MB) *
+              </label>
+              <input
+                ref={buyFileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,application/pdf"
+                required
+                disabled={buySubmitting}
+                onChange={(e) => setBuyScreenshot(e.target.files?.[0] ?? null)}
+                className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs"
+              />
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
             <Button
@@ -1065,39 +1124,46 @@ export default function BillingClient({
               </span>
             </div>
             <p className="mt-1.5 text-[11px] text-indigo-800">
-              {METHOD_META[topupMethod].instructions}
+              {requirePaymentProof
+                ? paymentSettings.instructions ||
+                  METHOD_META[topupMethod].instructions
+                : "Submit your top-up request below — our team will confirm with you on WhatsApp."}
             </p>
           </div>
 
-          <div className="grid grid-cols-3 gap-2">
-            {(["bank", "jazzcash", "easypaisa"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setTopupMethod(m)}
-                className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
-                  topupMethod === m
-                    ? "border-indigo-600 bg-indigo-50 text-indigo-700"
-                    : "border-slate-200 bg-white text-slate-700"
-                }`}
-              >
-                {m === "bank"
-                  ? "Bank Transfer"
-                  : m === "jazzcash"
-                    ? "JazzCash"
-                    : "Easypaisa"}
-              </button>
-            ))}
-          </div>
+          {requirePaymentProof && (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                {(["bank", "jazzcash", "easypaisa"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setTopupMethod(m)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
+                      topupMethod === m
+                        ? "border-indigo-600 bg-indigo-50 text-indigo-700"
+                        : "border-slate-200 bg-white text-slate-700"
+                    }`}
+                  >
+                    {m === "bank"
+                      ? "Bank Transfer"
+                      : m === "jazzcash"
+                        ? "JazzCash"
+                        : "Easypaisa"}
+                  </button>
+                ))}
+              </div>
 
-          <Input
-            label="Transaction Reference / TID *"
-            placeholder="e.g. 084920194821"
-            value={topupTxRef}
-            onChange={(e) => setTopupTxRef(e.target.value)}
-            required
-            disabled={topupSubmitting}
-          />
+              <Input
+                label="Transaction Reference / TID *"
+                placeholder="e.g. 084920194821"
+                value={topupTxRef}
+                onChange={(e) => setTopupTxRef(e.target.value)}
+                required
+                disabled={topupSubmitting}
+              />
+            </>
+          )}
 
           <Input
             label="Optional Note"
@@ -1107,20 +1173,22 @@ export default function BillingClient({
             disabled={topupSubmitting}
           />
 
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-700">
-              Payment Receipt Screenshot *
-            </label>
-            <input
-              ref={topupFileRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,application/pdf"
-              required
-              disabled={topupSubmitting}
-              onChange={(e) => setTopupScreenshot(e.target.files?.[0] ?? null)}
-              className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs"
-            />
-          </div>
+          {requirePaymentProof && (
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">
+                Payment Receipt Screenshot *
+              </label>
+              <input
+                ref={topupFileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,application/pdf"
+                required
+                disabled={topupSubmitting}
+                onChange={(e) => setTopupScreenshot(e.target.files?.[0] ?? null)}
+                className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs"
+              />
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
             <Button

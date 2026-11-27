@@ -3,6 +3,7 @@ import "server-only";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { checkSuperAdminPageAccess } from "@/lib/superadmin";
+import { getPendingSignupRequestsCount } from "@/lib/superadmin-data";
 import SuperAdminShell from "./SuperAdminShell";
 
 export const dynamic = "force-dynamic";
@@ -55,5 +56,14 @@ export default async function SuperAdminLayout({
     );
   }
 
-  return <SuperAdminShell user={access.user}>{children}</SuperAdminShell>;
+  const pendingRequestsCount = await getPendingSignupRequestsCount();
+
+  return (
+    <SuperAdminShell
+      user={access.user}
+      pendingRequestsCount={pendingRequestsCount}
+    >
+      {children}
+    </SuperAdminShell>
+  );
 }

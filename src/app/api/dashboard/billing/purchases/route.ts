@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentOrg, getCurrentUser } from "@/lib/auth";
+import { isPaymentProofRequired } from "@/lib/feature-flags";
 import {
   MAX_PAYMENT_PROOF_BYTES,
   validatePaymentProofBytes,
@@ -14,7 +15,10 @@ import {
   type PackageKind,
 } from "@/lib/pricing";
 import { getPricingAndPresets } from "@/lib/pricing-server";
-import { PurchaseRequestFieldsSchema } from "@/lib/schemas";
+import {
+  PurchaseRequestFieldsSchema,
+  PurchaseRequestNoProofFieldsSchema,
+} from "@/lib/schemas";
 import {
   checkCsrfOrigin,
   formatZodError,
@@ -45,9 +49,10 @@ async function ensurePaymentProofsBucket() {
 /**
  * POST /api/dashboard/billing/purchases
  * Creates a `pending` package purchase row in `public.purchases`.
- * Always recomputes `list_price_pkr`, `discount_pkr`, and `final_price_pkr`
- * on the server from `public.pricing_config` + `computePrice()` — never trusts
- * any amount sent by the client.
+ * - Enforces active organization access gate (`getCurrentOrg()`).
+ * - Respects `REQUIRE_PAYMENT_PROOF` (default off).
+ * - Always recomputes prices on the server from `public.pricing_config` + `computePrice()`
+ *   and persists `price_snapshot`.
  */
 export async function POST(req: NextRequest) {
   const csrf = checkCsrfOrigin(req);
@@ -68,11 +73,22 @@ export async function POST(req: NextRequest) {
   }
 
   const user = await getCurrentUser();
-  const org = await getCurrentOrg();
-  if (!user || !org) {
+  if (!user) {
     return NextResponse.json(
-      { error: "You must be signed in to buy a package." },
+      { error: "You must be signed in to buy a package.", code: "UNAUTHORIZED" },
       { status: 401 },
+    );
+  }
+
+  const org = await getCurrentOrg();
+  if (!org) {
+    return NextResponse.json(
+      {
+        error: "Your organization is pending approval.",
+        code: "ORG_NOT_ACTIVE",
+        redirectTo: "/pending",
+      },
+      { status: 403 },
     );
   }
 
@@ -86,52 +102,109 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const parsedFields = PurchaseRequestFieldsSchema.safeParse({
-    selectionType: String(formData.get("selectionType") ?? "preset"),
-    planId: formData.get("planId") ? String(formData.get("planId")) : "",
-    events: formData.get("events") ?? undefined,
-    certsPerEvent: formData.get("certsPerEvent") ?? undefined,
-    months: formData.get("months") ?? undefined,
-    paymentMethod: String(formData.get("paymentMethod") ?? "")
-      .trim()
-      .toLowerCase(),
-    transactionReference: String(formData.get("transactionReference") ?? ""),
-    paymentNote: String(formData.get("paymentNote") ?? ""),
-  });
+  const requireProof = isPaymentProofRequired();
 
-  if (!parsedFields.success) {
-    return NextResponse.json(
-      { error: formatZodError(parsedFields.error), code: "VALIDATION_ERROR" },
-      { status: 400 },
-    );
+  let selectionType: "preset" | "custom";
+  let planId: string | undefined;
+  let rawEvents: number | undefined;
+  let rawCerts: number | undefined;
+  let rawMonths: number | undefined;
+  let paymentMethod: "bank" | "jazzcash" | "easypaisa" | "manual" = "manual";
+  let transactionReference: string | null = null;
+  let paymentNote = "";
+
+  if (requireProof) {
+    const parsedFields = PurchaseRequestFieldsSchema.safeParse({
+      selectionType: String(formData.get("selectionType") ?? "preset"),
+      planId: formData.get("planId") ? String(formData.get("planId")) : "",
+      events: formData.get("events") ?? undefined,
+      certsPerEvent: formData.get("certsPerEvent") ?? undefined,
+      months: formData.get("months") ?? undefined,
+      paymentMethod: String(formData.get("paymentMethod") ?? "")
+        .trim()
+        .toLowerCase(),
+      transactionReference: String(formData.get("transactionReference") ?? ""),
+      paymentNote: String(formData.get("paymentNote") ?? ""),
+    });
+
+    if (!parsedFields.success) {
+      return NextResponse.json(
+        { error: formatZodError(parsedFields.error), code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+
+    selectionType = parsedFields.data.selectionType;
+    planId = parsedFields.data.planId;
+    rawEvents = parsedFields.data.events;
+    rawCerts = parsedFields.data.certsPerEvent;
+    rawMonths = parsedFields.data.months;
+    paymentMethod = parsedFields.data.paymentMethod;
+    transactionReference = parsedFields.data.transactionReference;
+    paymentNote = parsedFields.data.paymentNote;
+  } else {
+    const parsedFields = PurchaseRequestNoProofFieldsSchema.safeParse({
+      selectionType: String(formData.get("selectionType") ?? "preset"),
+      planId: formData.get("planId") ? String(formData.get("planId")) : "",
+      events: formData.get("events") ?? undefined,
+      certsPerEvent: formData.get("certsPerEvent") ?? undefined,
+      months: formData.get("months") ?? undefined,
+      paymentNote: String(formData.get("paymentNote") ?? ""),
+    });
+
+    if (!parsedFields.success) {
+      return NextResponse.json(
+        { error: formatZodError(parsedFields.error), code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+
+    selectionType = parsedFields.data.selectionType;
+    planId = parsedFields.data.planId;
+    rawEvents = parsedFields.data.events;
+    rawCerts = parsedFields.data.certsPerEvent;
+    rawMonths = parsedFields.data.months;
+    paymentMethod = "manual";
+    transactionReference = null;
+    paymentNote = parsedFields.data.paymentNote;
   }
 
-  const {
-    selectionType,
-    planId,
-    events: rawEvents,
-    certsPerEvent: rawCerts,
-    months: rawMonths,
-    paymentMethod,
-    transactionReference,
-    paymentNote,
-  } = parsedFields.data;
+  let fileBytes: Uint8Array | null = null;
+  let validatedProof: {
+    mimeType: string;
+    extension: string;
+  } | null = null;
 
   const screenshot = formData.get("screenshot");
-  if (!(screenshot instanceof File) || screenshot.size === 0) {
-    return NextResponse.json(
-      {
-        error:
-          "Please attach a payment receipt screenshot (PNG, JPG, WebP, or PDF, max 5 MB).",
-      },
-      { status: 400 },
-    );
-  }
-
-  const fileBytes = new Uint8Array(await screenshot.arrayBuffer());
-  const validatedProof = validatePaymentProofBytes(fileBytes, screenshot.type);
-  if (!validatedProof.valid) {
-    return NextResponse.json({ error: validatedProof.error }, { status: 400 });
+  if (requireProof) {
+    if (!(screenshot instanceof File) || screenshot.size === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "Please attach a payment receipt screenshot (PNG, JPG, WebP, or PDF, max 5 MB).",
+        },
+        { status: 400 },
+      );
+    }
+    fileBytes = new Uint8Array(await screenshot.arrayBuffer());
+    const proofCheck = validatePaymentProofBytes(fileBytes, screenshot.type);
+    if (!proofCheck.valid) {
+      return NextResponse.json({ error: proofCheck.error }, { status: 400 });
+    }
+    validatedProof = {
+      mimeType: proofCheck.mimeType,
+      extension: proofCheck.extension,
+    };
+  } else if (screenshot instanceof File && screenshot.size > 0) {
+    fileBytes = new Uint8Array(await screenshot.arrayBuffer());
+    const proofCheck = validatePaymentProofBytes(fileBytes, screenshot.type);
+    if (!proofCheck.valid) {
+      return NextResponse.json({ error: proofCheck.error }, { status: 400 });
+    }
+    validatedProof = {
+      mimeType: proofCheck.mimeType,
+      extension: proofCheck.extension,
+    };
   }
 
   const { pricingConfig, presets } = await getPricingAndPresets();
@@ -177,30 +250,51 @@ export async function POST(req: NextRequest) {
     months = check.normalized.months;
   }
 
-  // Server-side authoritative price computation (never trusts client amounts)
   const priceBreakdown = computePrice(
     { events: eventsTotal, certsPerEvent, months },
     pricingConfig,
   );
 
   const admin = getSupabaseAdmin();
-  await ensurePaymentProofsBucket();
+  let objectPath: string | null = null;
 
-  const objectPath = `${org.id}/purchase-${Date.now()}-${randomUUID().slice(0, 8)}.${validatedProof.extension}`;
-  const { error: uploadErr } = await admin.storage
-    .from("payment-proofs")
-    .upload(objectPath, fileBytes, {
-      contentType: validatedProof.mimeType,
-      upsert: false,
-    });
+  if (fileBytes && validatedProof) {
+    await ensurePaymentProofsBucket();
+    objectPath = `${org.id}/purchase-${Date.now()}-${randomUUID().slice(0, 8)}.${validatedProof.extension}`;
+    const { error: uploadErr } = await admin.storage
+      .from("payment-proofs")
+      .upload(objectPath, fileBytes, {
+        contentType: validatedProof.mimeType,
+        upsert: false,
+      });
 
-  if (uploadErr) {
-    console.error("[billing:purchases:upload] storage error:", uploadErr);
-    return NextResponse.json(
-      { error: "Failed to upload payment receipt screenshot. Please try again." },
-      { status: 500 },
-    );
+    if (uploadErr) {
+      console.error("[billing:purchases:upload] storage error:", uploadErr);
+      return NextResponse.json(
+        {
+          error: "Failed to upload payment receipt screenshot. Please try again.",
+        },
+        { status: 500 },
+      );
+    }
   }
+
+  const priceSnapshot = {
+    plan_id: resolvedPlanId,
+    kind,
+    events: eventsTotal,
+    certs_per_event: certsPerEvent,
+    months,
+    event_fee_pkr: pricingConfig.eventFeePkr,
+    cert_rate_pkr: pricingConfig.certRatePkr,
+    per_event_price_pkr: priceBreakdown.perEventPricePkr,
+    discount_percent: priceBreakdown.discountPercent,
+    duration_multiplier: priceBreakdown.durationMultiplier,
+    list_price_pkr: priceBreakdown.listPricePkr,
+    discount_pkr: priceBreakdown.discountPkr,
+    final_price_pkr: priceBreakdown.finalPricePkr,
+    currency: "PKR",
+  };
 
   const { data: created, error: insertErr } = await admin
     .from("purchases")
@@ -216,6 +310,7 @@ export async function POST(req: NextRequest) {
       list_price_pkr: priceBreakdown.listPricePkr,
       discount_pkr: priceBreakdown.discountPkr,
       final_price_pkr: priceBreakdown.finalPricePkr,
+      price_snapshot: priceSnapshot,
       is_pilot: false,
       payment_method: paymentMethod,
       transaction_reference: transactionReference,
@@ -227,10 +322,12 @@ export async function POST(req: NextRequest) {
     .maybeSingle();
 
   if (insertErr || !created) {
-    try {
-      await admin.storage.from("payment-proofs").remove([objectPath]);
-    } catch {
-      // Ignore cleanup error
+    if (objectPath) {
+      try {
+        await admin.storage.from("payment-proofs").remove([objectPath]);
+      } catch {
+        // Ignore cleanup error
+      }
     }
     console.error("[billing:purchases:insert] DB error:", insertErr);
     return NextResponse.json(

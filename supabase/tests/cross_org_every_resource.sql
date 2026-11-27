@@ -45,8 +45,8 @@ declare
   v_top_a  uuid;
   v_pay_a  uuid;
 begin
-  select org_id into v_org_a from public.create_organization_for_user(v_user_a, 'Victim Org A');
-  select org_id into v_org_b from public.create_organization_for_user(v_user_b, 'Attacker Org B');
+  select org_id into v_org_a from public.create_organization_for_user(v_user_a, 'Victim Org A', 'active');
+  select org_id into v_org_b from public.create_organization_for_user(v_user_b, 'Attacker Org B', 'active');
 
   insert into public.purchases (
     org_id, requested_by, plan_id, kind, events_total, events_used, certs_per_event,
@@ -55,6 +55,12 @@ begin
     v_org_a, v_user_a, 'single-100', 'single', 2, 1, 100, 3, 1000, 0, 1000,
     'active', now(), now() + interval '3 months'
   ) returning id into v_pur_a;
+
+  insert into public.payments (
+    org_id, purchase_id, provider, provider_ref, amount, currency, status
+  ) values (
+    v_org_a, v_pur_a, 'safepay', 'sfpy_sec_org_a_1', 1000, 'PKR', 'created'
+  );
 
   insert into public.purchases (
     org_id, requested_by, plan_id, kind, events_total, events_used, certs_per_event,
@@ -227,6 +233,36 @@ begin
   exception when others then v_blocked := true;
   end;
   if not v_blocked then raise exception 'LEAK: authenticated called create_event_consuming_slot RPC'; end if;
+
+  -- 5b. Payments cross-org isolation, payment_settings non-superadmin update, & self-activation attempts
+  select count(*)::int into v_cnt from public.payments where org_id = v_org_a;
+  if v_cnt <> 0 then raise exception 'LEAK: Attacker read Org A payments'; end if;
+
+  v_blocked := false;
+  begin
+    insert into public.payments (org_id, purchase_id, provider, provider_ref, amount, currency)
+    values (v_org_b, v_pur_a, 'safepay', 'sfpy_hybrid_steal', 1000, 'PKR');
+  exception when others then v_blocked := true;
+  end;
+  if not v_blocked then raise exception 'LEAK: Attacker linked payment to Org A purchase'; end if;
+
+  update public.payment_settings set bank_name = 'Attacker Bank' where id = true;
+  get diagnostics v_cnt = row_count;
+  if v_cnt <> 0 then raise exception 'LEAK: non-superadmin updated payment_settings'; end if;
+
+  v_blocked := false;
+  begin
+    perform * from public.activate_purchase_and_organization(v_pur_a, true, null, null, 'attacker', 'pilot');
+  exception when others then v_blocked := true;
+  end;
+  if not v_blocked then raise exception 'LEAK: authenticated called activate_purchase_and_organization RPC'; end if;
+
+  v_blocked := false;
+  begin
+    perform * from public.process_payment_webhook('safepay', 'sfpy_sec_org_a_1', 'paid', 1000, 'PKR', '{}'::jsonb);
+  exception when others then v_blocked := true;
+  end;
+  if not v_blocked then raise exception 'LEAK: authenticated called process_payment_webhook RPC'; end if;
 
   -- 6. Storage path helpers block cross-org & path-traversal access on both private buckets
   if public.can_access_template_object('templates', v_org_a::text || '/' || v_ev_a::text || '/tpl.pdf') then

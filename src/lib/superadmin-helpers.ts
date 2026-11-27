@@ -12,13 +12,19 @@ export interface ApprovedPaymentForRevenue {
   createdAt: string;
 }
 
+export type SuperAdminOrgStatus =
+  | "pending"
+  | "active"
+  | "rejected"
+  | "suspended";
+
 export interface SuperAdminOrgRow {
   id: string;
   name: string;
   slug: string;
   planId: string;
   planName: string;
-  status: "active" | "suspended";
+  status: SuperAdminOrgStatus;
   planExpiresAt: string | null;
   eventsCount: number;
   certificatesIssuedCount: number;
@@ -133,7 +139,7 @@ export function filterSuperAdminOrganizations(params: {
   organizations: SuperAdminOrgRow[];
   search?: string;
   planFilter?: string;
-  statusFilter?: "all" | "active" | "suspended";
+  statusFilter?: "all" | SuperAdminOrgStatus;
 }): SuperAdminOrgRow[] {
   const q = (params.search ?? "").trim().toLowerCase();
   const plan = (params.planFilter ?? "").trim().toLowerCase();

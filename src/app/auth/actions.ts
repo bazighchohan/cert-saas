@@ -10,6 +10,10 @@ import {
   provisionOrganizationForUser,
   resolveOrganizationName,
 } from "@/lib/auth";
+import { isPaymentGatewayEnabled } from "@/lib/feature-flags";
+import { notifySuperAdminNewSignupRequest } from "@/lib/notifications";
+import { getPaymentProvider } from "@/lib/payments";
+import { getPricingAndPresets } from "@/lib/pricing-server";
 import { clientIpFromHeaders, enforceRateLimit } from "@/lib/rate-limit";
 import {
   ForgotPasswordInputSchema,
@@ -18,7 +22,9 @@ import {
   SignupInputSchema,
 } from "@/lib/schemas";
 import { formatZodError, sanitizeClientErrorMessage } from "@/lib/security";
+import { executePilotSignup } from "@/lib/signup-flow";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export interface AuthActionResult {
@@ -53,13 +59,21 @@ function safeNextPath(
 
 export async function signupAction(input: {
   orgName: string;
+  contactName: string;
   email: string;
   password: string;
+  whatsappNumber: string;
+  selectionType?: "preset" | "custom";
+  planId?: string;
+  events?: number;
+  certsPerEvent?: number;
+  months?: number;
+  idempotencyKey?: string;
 }): Promise<AuthActionResult> {
   const h = await headers();
   const ip = clientIpFromHeaders(h);
 
-  const ipRl = await enforceRateLimit(`auth:signup:ip:${ip}`, 5, 60_000);
+  const ipRl = await enforceRateLimit(`auth:signup:ip:${ip}`, 8, 60_000);
   if (!ipRl.ok) {
     return {
       error: `Too many sign-up attempts. Please wait ${ipRl.retryAfterSec}s and try again.`,
@@ -71,71 +85,200 @@ export async function signupAction(input: {
     return { error: formatZodError(parsed.error) };
   }
 
-  const { orgName: rawOrgName, email, password } = parsed.data;
+  const data = parsed.data;
   const orgName = resolveOrganizationName({
-    explicitName: rawOrgName,
-    email,
+    explicitName: data.orgName,
+    email: data.email,
   });
 
-  const origin = await getAppOrigin();
-  const supabase = await createSupabaseServerClient();
+  const [{ pricingConfig, presets }, origin, supabase] = await Promise.all([
+    getPricingAndPresets(),
+    getAppOrigin(),
+    createSupabaseServerClient(),
+  ]);
+  const admin = getSupabaseAdmin();
 
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: {
-        organization_name: orgName,
-        org_name: orgName,
-      },
-      emailRedirectTo: `${origin}/auth/callback?next=/dashboard`,
-    },
-  });
-
-  if (error) {
-    console.error("[auth:signupAction] Supabase signUp error:", error);
-    return {
-      error: sanitizeClientErrorMessage(
-        error,
-        "Could not create account. Please check your details and try again.",
-      ),
-    };
-  }
-
-  if (!data.user) {
-    return { error: "Could not create user account. Please try again." };
-  }
-
-  if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
-    return {
-      error: "An account with this email already exists. Please sign in instead.",
-    };
-  }
-
-  try {
-    await provisionOrganizationForUser(
-      data.user.id,
+  const outcome = await executePilotSignup(
+    {
       orgName,
-      email,
-      data.user.user_metadata as Record<string, unknown> | undefined,
-    );
-  } catch (err) {
-    console.error("[auth:signupAction] Organization provisioning failed:", err);
-    if (data.session) {
-      return {
-        error: "Account created, but organization setup failed. Please retry from the dashboard.",
-      };
-    }
-  }
+      contactName: data.contactName,
+      email: data.email,
+      password: data.password,
+      whatsappNumber: data.whatsappNumber,
+      selectionType: data.selectionType,
+      planId: data.planId,
+      events: data.events,
+      certsPerEvent: data.certsPerEvent,
+      months: data.months,
+      idempotencyKey: data.idempotencyKey,
+    },
+    {
+      pricingConfig,
+      presets,
+      async createAuthUser({ email, password, metadata }) {
+        const { data: created, error } = await admin.auth.admin.createUser({
+          email,
+          password,
+          email_confirm: true,
+          user_metadata: metadata,
+        });
 
-  if (data.session) {
-    return { success: true, redirectTo: "/dashboard" };
+        if (error) {
+          const msg = (error.message || "").toLowerCase();
+          const alreadyExists =
+            msg.includes("already been registered") ||
+            msg.includes("already registered") ||
+            msg.includes("already exists") ||
+            error.status === 422;
+          return {
+            ok: false,
+            alreadyExists,
+            error: sanitizeClientErrorMessage(
+              error,
+              "Could not create account. Please check your details and try again.",
+            ),
+          };
+        }
+
+        if (!created.user?.id) {
+          return {
+            ok: false,
+            alreadyExists: false,
+            error: "Could not create user account. Please try again.",
+          };
+        }
+
+        return { ok: true, userId: created.user.id };
+      },
+      async deleteAuthUser(userId) {
+        await admin.auth.admin.deleteUser(userId);
+      },
+      async signInWithPassword({ email, password }) {
+        const { data: signedIn, error } =
+          await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
+        if (error || !signedIn.user?.id) {
+          return { ok: false, error: error?.message };
+        }
+        return { ok: true, userId: signedIn.user.id };
+      },
+      async runSignupPendingOrgRpc(params) {
+        const { data: rpcRows, error: rpcErr } = await admin.rpc(
+          "signup_pending_organization",
+          {
+            p_user_id: params.userId,
+            p_email: params.email,
+            p_org_name: params.orgName,
+            p_contact_name: params.contactName,
+            p_whatsapp_number: params.whatsappNumber,
+            p_plan_id: params.planId,
+            p_kind: params.kind,
+            p_events_total: params.eventsTotal,
+            p_certs_per_event: params.certsPerEvent,
+            p_months: params.months,
+            p_list_price_pkr: params.listPricePkr,
+            p_discount_pkr: params.discountPkr,
+            p_final_price_pkr: params.finalPricePkr,
+            p_price_snapshot: params.priceSnapshot,
+            p_idempotency_key: params.idempotencyKey,
+          },
+        );
+
+        if (rpcErr || !rpcRows) {
+          throw new Error(
+            sanitizeClientErrorMessage(
+              rpcErr,
+              "Could not save your organization signup request.",
+            ),
+          );
+        }
+
+        const row = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as
+          | Record<string, unknown>
+          | undefined;
+        if (!row?.org_id || !row?.purchase_id) {
+          throw new Error("Could not save your organization signup request.");
+        }
+
+        return {
+          orgId: String(row.org_id),
+          orgStatus: String(row.org_status ?? "pending"),
+          purchaseId: String(row.purchase_id),
+          purchaseStatus: String(row.purchase_status ?? "pending"),
+          alreadyExisted: Boolean(row.already_existed),
+        };
+      },
+      async onAfterCreated({ orgId, purchaseId, alreadyExisted, resolvedPlan }) {
+        if (!alreadyExisted) {
+          // Non-blocking Resend email notification when EMAILS_ENABLED=true
+          await notifySuperAdminNewSignupRequest({
+            orgName,
+            contactName: data.contactName,
+            email: data.email,
+            whatsappNumber: data.whatsappNumber,
+            planSummary: resolvedPlan.planSummary,
+            listPricePkr: resolvedPlan.breakdown.listPricePkr,
+            finalPricePkr: resolvedPlan.breakdown.finalPricePkr,
+          });
+        }
+
+        // Optional gateway checkout (OFF by default: PAYMENT_GATEWAY_ENABLED=false)
+        if (isPaymentGatewayEnabled() && !alreadyExisted) {
+          try {
+            const provider = getPaymentProvider();
+            const checkout = await provider.createCheckout({
+              purchaseId,
+              amount: resolvedPlan.breakdown.finalPricePkr,
+              currency: "PKR",
+              customer: {
+                name: data.contactName,
+                email: data.email,
+                phone: data.whatsappNumber,
+                orgId,
+                orgName,
+              },
+              returnUrl: `${origin}/pending`,
+            });
+
+            await admin.from("payments").insert({
+              org_id: orgId,
+              purchase_id: purchaseId,
+              provider: provider.name,
+              provider_ref: checkout.providerRef,
+              amount: resolvedPlan.breakdown.finalPricePkr,
+              currency: "PKR",
+              status: "created",
+              raw_event: { checkout_url: checkout.checkoutUrl },
+            });
+
+            revalidatePath("/superadmin", "layout");
+            return { redirectTo: checkout.checkoutUrl };
+          } catch (gatewayErr) {
+            console.error(
+              "[auth:signupAction] Payment gateway checkout init failed, falling back to /pending:",
+              gatewayErr,
+            );
+          }
+        }
+
+        revalidatePath("/superadmin", "layout");
+        revalidatePath("/pending");
+      },
+    },
+  );
+
+  if (outcome.error) {
+    return {
+      error: outcome.error,
+      redirectTo: outcome.redirectTo,
+    };
   }
 
   return {
     success: true,
-    requiresEmailConfirmation: true,
-    email,
+    redirectTo: outcome.redirectTo || "/pending",
   };
 }
 
@@ -160,7 +303,11 @@ export async function loginAction(input: {
   ]);
 
   if (!ipRl.ok || !emailRl.ok) {
-    const wait = !ipRl.ok ? ipRl.retryAfterSec : !emailRl.ok ? emailRl.retryAfterSec : 60;
+    const wait = !ipRl.ok
+      ? ipRl.retryAfterSec
+      : !emailRl.ok
+        ? emailRl.retryAfterSec
+        : 60;
     return {
       error: `Too many sign-in attempts. Please wait ${wait}s before trying again.`,
     };
@@ -181,20 +328,16 @@ export async function loginAction(input: {
     isUserInSuperAdminsTable(data.user?.id),
   ]);
 
-  if (org?.status === "suspended" && !isSuperAdmin) {
-    await supabase.auth.signOut();
+  if (!isSuperAdmin && (!org || org.status !== "active")) {
     return {
-      error:
-        "This organization account has been suspended. Please contact platform support.",
+      success: true,
+      redirectTo: "/pending",
     };
   }
 
   return {
     success: true,
-    redirectTo: safeNextPath(
-      next,
-      org?.status === "suspended" && isSuperAdmin ? "/superadmin" : "/dashboard",
-    ),
+    redirectTo: safeNextPath(next, "/dashboard"),
   };
 }
 
@@ -207,7 +350,9 @@ export async function retryProvisionOrganizationAction(input?: {
   }
 
   const cleanExplicit =
-    typeof input?.orgName === "string" ? input.orgName.trim().slice(0, 200) : undefined;
+    typeof input?.orgName === "string"
+      ? input.orgName.trim().slice(0, 200)
+      : undefined;
 
   const resolvedName = resolveOrganizationName({
     explicitName: cleanExplicit,
@@ -216,14 +361,22 @@ export async function retryProvisionOrganizationAction(input?: {
   });
 
   try {
-    await provisionOrganizationForUser(
-      user.id,
-      resolvedName,
-      user.email,
-      user.userMetadata,
-    );
+    const [org, isSuperAdmin] = await Promise.all([
+      provisionOrganizationForUser(
+        user.id,
+        resolvedName,
+        user.email,
+        user.userMetadata,
+      ),
+      isUserInSuperAdminsTable(user.id),
+    ]);
     revalidatePath("/dashboard", "layout");
-    return { success: true, redirectTo: "/dashboard" };
+    revalidatePath("/pending");
+    return {
+      success: true,
+      redirectTo:
+        org.status === "active" || isSuperAdmin ? "/dashboard" : "/pending",
+    };
   } catch (err) {
     console.error(
       "[auth:retryProvisionOrganizationAction] Provisioning retry failed:",
@@ -260,7 +413,8 @@ export async function forgotPasswordAction(input: {
 
   if (!ipRl.ok || !emailRl.ok) {
     return {
-      error: "Too many password reset requests. Please wait a minute and try again.",
+      error:
+        "Too many password reset requests. Please wait a minute and try again.",
     };
   }
 
@@ -273,9 +427,9 @@ export async function forgotPasswordAction(input: {
 
   if (error) {
     console.error("[auth:forgotPasswordAction] error:", error);
-    // Return generic success or safe message to prevent account enumeration & stack leaks
     return {
-      error: "Could not send password reset email right now. Please try again shortly.",
+      error:
+        "Could not send password reset email right now. Please try again shortly.",
     };
   }
 
@@ -294,7 +448,8 @@ export async function resetPasswordAction(input: {
   const ipRl = await enforceRateLimit(`auth:reset:ip:${ip}`, 6, 60_000);
   if (!ipRl.ok) {
     return {
-      error: "Too many password reset attempts. Please wait a minute and try again.",
+      error:
+        "Too many password reset attempts. Please wait a minute and try again.",
     };
   }
 

@@ -121,7 +121,11 @@ export default function LandingPricingCalculator({
                 </div>
 
                 <Link
-                  href={ctaHref}
+                  href={
+                    isSignedIn
+                      ? "/dashboard/billing"
+                      : `/signup?plan=${encodeURIComponent(preset.id)}`
+                  }
                   className={`mt-5 block rounded-xl px-3.5 py-2.5 text-center text-xs font-bold transition ${
                     isPro
                       ? "bg-white text-indigo-950 hover:bg-indigo-50"
@@ -302,7 +306,11 @@ export default function LandingPricingCalculator({
             </div>
 
             <Link
-              href={ctaHref}
+              href={
+                isSignedIn
+                  ? "/dashboard/billing"
+                  : `/signup?plan=custom&events=${events}&certs=${certsPerEvent}&months=${months}`
+              }
               className="mt-6 block rounded-xl bg-indigo-600 px-4 py-3 text-center text-sm font-bold text-white shadow-xs transition hover:bg-indigo-700"
             >
               {ctaLabel}

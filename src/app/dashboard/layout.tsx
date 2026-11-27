@@ -7,6 +7,7 @@ import {
   getCurrentUser,
   resolveOrganizationName,
 } from "@/lib/auth";
+import { isUserInSuperAdminsTable } from "@/lib/superadmin";
 import DashboardShell from "./DashboardShell";
 import ProvisionOrgErrorCard from "./ProvisionOrgErrorCard";
 
@@ -22,7 +23,10 @@ export default async function DashboardLayout({
     redirect("/login");
   }
 
-  const { org, error } = await getCurrentOrgResult();
+  const [{ org, error }, isSuperAdmin] = await Promise.all([
+    getCurrentOrgResult(),
+    isUserInSuperAdminsTable(user.id),
+  ]);
   if (!org) {
     const defaultOrgName = resolveOrganizationName({
       explicitName: user.orgNameFromMeta,
@@ -42,8 +46,8 @@ export default async function DashboardLayout({
     );
   }
 
-  if (org.status !== "active") {
-    redirect("/account-suspended");
+  if (org.status !== "active" && !isSuperAdmin) {
+    redirect("/pending");
   }
 
   return (

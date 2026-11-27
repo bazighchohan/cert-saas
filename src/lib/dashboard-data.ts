@@ -2,6 +2,7 @@ import "server-only";
 
 import { cache } from "react";
 import { requireDashboardAuth, type CurrentOrg, type CurrentUser } from "@/lib/auth";
+import { isPaymentProofRequired } from "@/lib/feature-flags";
 import {
   isPlanExpired,
   sortActiveUnexpiredPurchases,
@@ -14,10 +15,20 @@ import {
 } from "@/lib/pricing";
 import { getPricingAndPresets } from "@/lib/pricing-server";
 import { isUserInSuperAdminsTable } from "@/lib/superadmin";
+import {
+  getPaymentSettings,
+  type PaymentSettingsData,
+} from "@/lib/payment-settings";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export type PaymentMethod = "bank" | "jazzcash" | "easypaisa" | "pilot" | "manual";
+export type PaymentMethod =
+  | "bank"
+  | "jazzcash"
+  | "easypaisa"
+  | "pilot"
+  | "manual"
+  | "safepay";
 
 export interface PurchaseRow {
   id: string;
@@ -68,10 +79,10 @@ export interface CertificateTopupRow {
 
 export interface CreateEventBlockInfo {
   code:
-    | "PURCHASE_PENDING"
-    | "NO_ACTIVE_PURCHASE"
-    | "NO_EVENT_SLOTS"
-    | "PURCHASE_EXPIRED";
+  | "PURCHASE_PENDING"
+  | "NO_ACTIVE_PURCHASE"
+  | "NO_EVENT_SLOTS"
+  | "PURCHASE_EXPIRED";
   message: string;
 }
 
@@ -96,6 +107,8 @@ export interface BillingDashboardData extends OrgUsageSummary {
   events: EventSummaryRow[];
   topups: CertificateTopupRow[];
   isSuperAdmin: boolean;
+  requirePaymentProof: boolean;
+  paymentSettings: PaymentSettingsData;
 }
 
 export interface CertificateTypeRow {
@@ -191,7 +204,7 @@ export function mapPurchaseRow(
   const rawMethod = r.payment_method ? String(r.payment_method) : null;
   const paymentMethod: PaymentMethod | null =
     rawMethod &&
-    ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
+      ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
       ? (rawMethod as PaymentMethod)
       : null;
 
@@ -247,7 +260,7 @@ export function mapTopupRow(
   const rawMethod = r.payment_method ? String(r.payment_method) : null;
   const paymentMethod: PaymentMethod | null =
     rawMethod &&
-    ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
+      ["bank", "jazzcash", "easypaisa", "pilot", "manual"].includes(rawMethod)
       ? (rawMethod as PaymentMethod)
       : null;
 
@@ -622,11 +635,13 @@ export async function getOrgEventById(
 }
 
 export async function getBillingDashboardData(): Promise<BillingDashboardData> {
-  const [usage, events, { pricingConfig, presets }] = await Promise.all([
-    getOrgPlanAndUsage(),
-    getOrgEvents(),
-    getPricingAndPresets(),
-  ]);
+  const [usage, events, { pricingConfig, presets }, paymentSettings] =
+    await Promise.all([
+      getOrgPlanAndUsage(),
+      getOrgEvents(),
+      getPricingAndPresets(),
+      getPaymentSettings(),
+    ]);
 
   const supabase = await createSupabaseServerClient();
   const [topupsRes, superAdmin] = await Promise.all([
@@ -651,5 +666,7 @@ export async function getBillingDashboardData(): Promise<BillingDashboardData> {
     events,
     topups,
     isSuperAdmin: superAdmin,
+    requirePaymentProof: isPaymentProofRequired(),
+    paymentSettings,
   };
 }

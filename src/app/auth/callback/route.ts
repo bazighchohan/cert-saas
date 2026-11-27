@@ -63,14 +63,8 @@ export async function GET(req: NextRequest) {
     isUserInSuperAdminsTable(user?.id),
   ]);
 
-  if (org?.status === "suspended" && !isSuperAdmin) {
-    await supabase.auth.signOut();
-    const loginUrl = new URL("/login", req.url);
-    loginUrl.searchParams.set(
-      "error",
-      "This organization account has been suspended. Please contact support.",
-    );
-    return NextResponse.redirect(loginUrl);
+  if (!isSuperAdmin && (!org || org.status !== "active")) {
+    return NextResponse.redirect(new URL("/pending", req.url));
   }
 
   return NextResponse.redirect(new URL(next, req.url));

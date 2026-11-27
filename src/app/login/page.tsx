@@ -17,8 +17,8 @@ export default async function LoginPage({
       getCurrentOrgResult(),
       isUserInSuperAdminsTable(user.id),
     ]);
-    if (org?.status === "suspended" && !isSuperAdmin) {
-      redirect("/account-suspended");
+    if (!isSuperAdmin && (!org || org.status !== "active")) {
+      redirect("/pending");
     }
     const safeDest =
       next && next.startsWith("/") && !next.startsWith("//")

@@ -37,7 +37,7 @@ export default function OrganizationsListClient({
   const [search, setSearch] = useState("");
   const [planFilter, setPlanFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<
-    "all" | "active" | "suspended"
+    "all" | "pending" | "active" | "rejected" | "suspended"
   >("all");
 
   const [confirmOrg, setConfirmOrg] = useState<SuperAdminOrgRow | null>(null);
@@ -132,13 +132,22 @@ export default function OrganizationsListClient({
           <select
             value={statusFilter}
             onChange={(e) =>
-              setStatusFilter(e.target.value as "all" | "active" | "suspended")
+              setStatusFilter(
+                e.target.value as
+                  | "all"
+                  | "pending"
+                  | "active"
+                  | "rejected"
+                  | "suspended",
+              )
             }
             aria-label="Filter by status"
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus:border-indigo-500 focus:outline-none"
           >
             <option value="all">All Statuses</option>
+            <option value="pending">Pending</option>
             <option value="active">Active</option>
+            <option value="rejected">Rejected</option>
             <option value="suspended">Suspended</option>
           </select>
         </div>
@@ -200,11 +209,10 @@ export default function OrganizationsListClient({
                         </span>
                         {org.planExpiresAt && (
                           <p
-                            className={`mt-1 text-[11px] ${
-                              expired
-                                ? "font-semibold text-red-600"
-                                : "text-slate-500"
-                            }`}
+                            className={`mt-1 text-[11px] ${expired
+                              ? "font-semibold text-red-600"
+                              : "text-slate-500"
+                              }`}
                           >
                             {expired ? "Expired " : "Until "}
                             {new Date(org.planExpiresAt).toLocaleDateString()}
@@ -213,11 +221,22 @@ export default function OrganizationsListClient({
                       </td>
 
                       <td className="px-5 py-3.5">
-                        {org.status === "active" ? (
+                        {org.status === "active" && (
                           <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
                             Active
                           </span>
-                        ) : (
+                        )}
+                        {org.status === "pending" && (
+                          <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
+                            Pending
+                          </span>
+                        )}
+                        {org.status === "rejected" && (
+                          <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700 ring-1 ring-red-200">
+                            Rejected
+                          </span>
+                        )}
+                        {org.status === "suspended" && (
                           <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-semibold text-red-800 ring-1 ring-red-200">
                             Suspended
                           </span>

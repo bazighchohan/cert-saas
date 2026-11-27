@@ -100,7 +100,7 @@ export default function LoginForm({
       <p className="text-center text-xs text-slate-600">
         New organization?{" "}
         <Link href="/signup" className="font-semibold text-indigo-600 hover:text-indigo-500">
-          Create a free account
+          Request organization access
         </Link>
       </p>
     </form>

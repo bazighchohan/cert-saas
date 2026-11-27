@@ -36,17 +36,45 @@ export const EmailSchema = z
 // -----------------------------------------------------------------------------
 // Auth Server Actions
 // -----------------------------------------------------------------------------
+export const WhatsappNumberSchema = z
+  .string()
+  .trim()
+  .min(6, "Please enter a valid WhatsApp number (e.g. +92 300 1234567).")
+  .max(30, "WhatsApp number is too long.")
+  .regex(
+    /^\+?[0-9][0-9\s()-]{4,28}[0-9]$/,
+    "Please enter a valid WhatsApp number (digits, spaces, or leading +).",
+  );
+
 export const SignupInputSchema = z.object({
   orgName: z
     .string()
     .trim()
     .min(2, "Organization name must be between 2 and 200 characters.")
     .max(200, "Organization name must be between 2 and 200 characters."),
+  contactName: z
+    .string()
+    .trim()
+    .min(2, "Contact person name must be between 2 and 200 characters.")
+    .max(200, "Contact person name must be between 2 and 200 characters."),
   email: EmailSchema,
   password: z
     .string()
     .min(8, "Password must be at least 8 characters.")
     .max(128, "Password cannot exceed 128 characters."),
+  whatsappNumber: WhatsappNumberSchema,
+  selectionType: z.enum(["preset", "custom"]).default("preset"),
+  planId: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9_-]{2,32}$/, "Please choose a valid plan preset.")
+    .optional()
+    .or(z.literal("")),
+  events: z.coerce.number().int().min(1).max(20).optional(),
+  certsPerEvent: z.coerce.number().int().min(25).max(500).optional(),
+  months: z.coerce.number().int().optional(),
+  idempotencyKey: z.string().trim().max(120).optional(),
 });
 
 export const LoginInputSchema = z.object({
@@ -336,7 +364,7 @@ export const DownloadsExportQuerySchema = z.object({
     .enum(["all", "downloaded", "not_downloaded"])
     .optional()
     .default("downloaded"),
-  format: z.enum(["csv", "xlsx"]).optional() .default("csv"),
+  format: z.enum(["csv", "xlsx"]).optional().default("csv"),
   certTypeId: z
     .union([UuidSchema, z.literal("")])
     .optional()
@@ -489,6 +517,63 @@ export const SuperAdminExtendExpirySchema = z.object({
     .or(z.literal("")),
   clearExpiry: z.boolean().optional(),
   reason: z.string().trim().max(500).optional(),
+});
+
+export const PurchaseRequestNoProofFieldsSchema = z.object({
+  selectionType: z.enum(["preset", "custom"]).default("preset"),
+  planId: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9_-]{2,32}$/)
+    .optional()
+    .or(z.literal("")),
+  events: z.coerce.number().int().min(1).max(20).optional(),
+  certsPerEvent: z.coerce.number().int().min(25).max(500).optional(),
+  months: z.coerce.number().int().optional(),
+  paymentNote: z.string().trim().max(500).optional().default(""),
+});
+
+export const CertificateTopupNoProofFieldsSchema = z.object({
+  eventId: UuidSchema,
+  certsAdded: z.coerce
+    .number()
+    .int()
+    .min(25, "Minimum top-up is 25 certificates.")
+    .max(5000, "Maximum single top-up is 5,000 certificates."),
+  paymentNote: z.string().trim().max(500).optional().default(""),
+});
+
+export const SuperAdminApproveSignupRequestSchema = z.object({
+  orgId: UuidSchema,
+  purchaseId: UuidSchema,
+  mode: z.enum(["pilot", "paid"]),
+  paymentNote: z.string().trim().max(500).optional(),
+});
+
+export const SuperAdminRejectSignupRequestSchema = z.object({
+  orgId: UuidSchema,
+  purchaseId: UuidSchema.optional(),
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Please enter a rejection reason (at least 3 characters).")
+    .max(1000, "Rejection reason cannot exceed 1,000 characters."),
+});
+
+export const SuperAdminPaymentSettingsSchema = z.object({
+  bankEnabled: z.boolean(),
+  bankName: z.string().trim().min(1).max(120),
+  bankAccountTitle: z.string().trim().min(1).max(160),
+  bankAccountNumber: z.string().trim().min(1).max(80),
+  bankIban: z.string().trim().max(80).default(""),
+  jazzcashEnabled: z.boolean(),
+  jazzcashAccountTitle: z.string().trim().min(1).max(160),
+  jazzcashNumber: z.string().trim().min(1).max(40),
+  easypaisaEnabled: z.boolean(),
+  easypaisaAccountTitle: z.string().trim().min(1).max(160),
+  easypaisaNumber: z.string().trim().min(1).max(40),
+  instructions: z.string().trim().max(1000).default(""),
 });
 
 export const SuperAdminPricingConfigSchema = z.object({

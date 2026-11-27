@@ -23,9 +23,9 @@ insert into auth.users (id) values
   ('a0000000-0000-4000-8000-000000000003'),
   ('b0000000-0000-4000-8000-000000000001');
 
-insert into public.organizations (id, name, slug, plan_id) values
-  ('a1111111-0000-4000-8000-000000000000', 'Test Org A', 'zz-test-org-a', null),
-  ('b1111111-0000-4000-8000-000000000000', 'Test Org B', 'zz-test-org-b', null);
+insert into public.organizations (id, name, slug, plan_id, status) values
+  ('a1111111-0000-4000-8000-000000000000', 'Test Org A', 'zz-test-org-a', null, 'active'),
+  ('b1111111-0000-4000-8000-000000000000', 'Test Org B', 'zz-test-org-b', null, 'active');
 
 insert into public.organization_members (org_id, user_id, role) values
   ('a1111111-0000-4000-8000-000000000000', 'a0000000-0000-4000-8000-000000000001', 'owner'),
@@ -222,6 +222,7 @@ select pg_temp.deny('trick: move own event into org B', $$update public.events s
 select pg_temp.deny('trick: point own event at org B purchase', $$update public.events set purchase_id = 'b6666666-0000-4000-8000-000000000000' where id = 'a2222222-0000-4000-8000-000000000000'$$);
 select pg_temp.deny('trick: own-org attendee pointing at org B event', $$insert into public.attendees (org_id, event_id, identifier, full_name) values ('a1111111-0000-4000-8000-000000000000', 'b2222222-0000-4000-8000-000000000000', 'X', 'X')$$);
 select pg_temp.deny('trick: A upgrades own plan_id column', $$update public.organizations set plan_id = 'pro' where id = 'a1111111-0000-4000-8000-000000000000'$$);
+select pg_temp.deny('trick: A self-activates status column', $$update public.organizations set status = 'active' where id = 'a1111111-0000-4000-8000-000000000000'$$);
 select pg_temp.eq  ('trick: event_org_id(org B event) returns NULL', $$select public.event_org_id('b2222222-0000-4000-8000-000000000000')::text$$, null);
 select pg_temp.eq  ('trick: is_org_member(org B) is false', $$select public.is_org_member('b1111111-0000-4000-8000-000000000000')::text$$, 'false');
 
@@ -243,6 +244,7 @@ set role anon;
 select pg_temp.login(null);
 select pg_temp.deny('anon: cannot SELECT organizations',  $$select * from public.organizations$$);
 select pg_temp.deny('anon: cannot SELECT purchases',      $$select * from public.purchases$$);
+select pg_temp.deny('anon: cannot SELECT payments',       $$select * from public.payments$$);
 select pg_temp.deny('anon: cannot SELECT topups',         $$select * from public.certificate_topups$$);
 select pg_temp.deny('anon: cannot SELECT events',         $$select * from public.events$$);
 select pg_temp.deny('anon: cannot SELECT attendees',      $$select * from public.attendees$$);

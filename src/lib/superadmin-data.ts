@@ -6,6 +6,12 @@ import {
   type CertificateTopupRow,
   type PurchaseRow,
 } from "@/lib/dashboard-data";
+import { getFeatureFlags, type PlatformFeatureFlags } from "@/lib/feature-flags";
+import {
+  DEFAULT_PAYMENT_SETTINGS,
+  getPaymentSettings,
+  type PaymentSettingsData,
+} from "@/lib/payment-settings";
 import { isPlanExpired } from "@/lib/plan-enforcement-helpers";
 import type { PricedPlanPreset, PricingConfig } from "@/lib/pricing";
 import { getPricingAndPresets } from "@/lib/pricing-server";
@@ -15,6 +21,7 @@ import {
   type ApprovedPaymentForRevenue,
   type MonthlyRevenuePoint,
   type SuperAdminOrgRow,
+  type SuperAdminOrgStatus,
 } from "@/lib/superadmin-helpers";
 
 export interface PlatformAuditLogItem {
@@ -41,9 +48,40 @@ export interface ExpiringPurchaseOverviewItem {
   daysRemaining: number;
 }
 
+export { DEFAULT_PAYMENT_SETTINGS, getPaymentSettings };
+export type { PaymentSettingsData };
+
+export interface SignupRequestQueueRow {
+  orgId: string;
+  orgName: string;
+  orgSlug: string;
+  orgStatus: SuperAdminOrgStatus;
+  contactName: string;
+  email: string;
+  whatsappNumber: string;
+  rejectionReason: string | null;
+  purchaseId: string | null;
+  purchaseStatus: string;
+  planId: string | null;
+  planSummary: string;
+  eventsTotal: number;
+  certsPerEvent: number;
+  months: number;
+  listPricePkr: number;
+  discountPkr: number;
+  finalPricePkr: number;
+  isPilot: boolean;
+  paymentNote: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
 export interface PlatformOverviewData {
   totalOrgs: number;
   activeOrgs: number;
+  pendingOrgs: number;
+  rejectedOrgs: number;
   suspendedOrgs: number;
   paidOrgs: number;
   totalEvents: number;
@@ -88,7 +126,11 @@ export interface SuperAdminOrgDetailData {
     slug: string;
     planId: string;
     packageLabel: string;
-    status: "active" | "suspended";
+    status: SuperAdminOrgStatus;
+    contactName: string | null;
+    contactEmail: string | null;
+    whatsappNumber: string | null;
+    rejectionReason: string | null;
     planExpiresAt: string | null;
     planExpiringSoon: boolean;
     createdAt: string;
@@ -115,9 +157,36 @@ export interface SuperAdminPaymentsQueueData {
   topups: CertificateTopupRow[];
 }
 
+function normalizeSuperOrgStatus(raw: unknown): SuperAdminOrgStatus {
+  if (
+    raw === "pending" ||
+    raw === "active" ||
+    raw === "rejected" ||
+    raw === "suspended"
+  ) {
+    return raw;
+  }
+  return "active";
+}
+
+export async function getPendingSignupRequestsCount(): Promise<number> {
+  try {
+    const admin = getSupabaseAdmin();
+    const { count } = await admin
+      .from("organizations")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending");
+    return count ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function fetchMembersAuthDirectory(
   targetOrgId?: string,
-): Promise<SuperAdminMemberRow[] & { byOrg?: Map<string, SuperAdminMemberRow[]> }> {
+): Promise<
+  SuperAdminMemberRow[] & { byOrg?: Map<string, SuperAdminMemberRow[]> }
+> {
   const admin = getSupabaseAdmin();
   const byOrg = new Map<string, SuperAdminMemberRow[]>();
   const flat: SuperAdminMemberRow[] = [];
@@ -192,6 +261,132 @@ async function fetchMembersAuthDirectory(
   return Object.assign(flat, { byOrg });
 }
 
+export async function getSuperAdminSignupRequestsData(): Promise<{
+  requests: SignupRequestQueueRow[];
+  pendingCount: number;
+  featureFlags: PlatformFeatureFlags;
+}> {
+  const admin = getSupabaseAdmin();
+
+  const [orgsRes, purchasesRes, membersDir] = await Promise.all([
+    admin
+      .from("organizations")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(250),
+    admin
+      .from("purchases")
+      .select("*, plans(name)")
+      .order("created_at", { ascending: true }),
+    fetchMembersAuthDirectory(),
+  ]);
+
+  const initialPurchaseByOrg = new Map<string, Record<string, unknown>>();
+  for (const p of (purchasesRes.data ?? []) as Array<Record<string, unknown>>) {
+    const oid = String(p.org_id);
+    if (!initialPurchaseByOrg.has(oid)) {
+      initialPurchaseByOrg.set(oid, p);
+    }
+  }
+
+  const requests: SignupRequestQueueRow[] = [];
+  let pendingCount = 0;
+
+  for (const o of (orgsRes.data ?? []) as Array<Record<string, unknown>>) {
+    const orgId = String(o.id);
+    const orgStatus = normalizeSuperOrgStatus(o.status);
+    if (orgStatus === "pending") {
+      pendingCount++;
+    }
+
+    const p = initialPurchaseByOrg.get(orgId);
+    const hasContactMeta =
+      typeof o.contact_name === "string" ||
+      typeof o.whatsapp_number === "string";
+
+    // Include all pending/rejected orgs plus orgs that went through the signup request flow
+    if (
+      orgStatus !== "pending" &&
+      orgStatus !== "rejected" &&
+      !hasContactMeta
+    ) {
+      continue;
+    }
+
+    const members = membersDir.byOrg?.get(orgId) ?? [];
+    const ownerEmail =
+      (typeof o.contact_email === "string" && o.contact_email) ||
+      members.find((m) => m.role === "owner")?.email ||
+      members[0]?.email ||
+      "—";
+
+    const planRel = p
+      ? Array.isArray(p.plans)
+        ? (p.plans[0] as Record<string, unknown> | undefined)
+        : (p.plans as Record<string, unknown> | undefined)
+      : undefined;
+
+    const kind = p ? String(p.kind ?? "custom") : "custom";
+    const eventsTotal = p ? Number(p.events_total ?? 1) : 1;
+    const certsPerEvent = p ? Number(p.certs_per_event ?? 50) : 50;
+    const months = p ? Number(p.months ?? 3) : 3;
+    const presetName =
+      typeof planRel?.name === "string"
+        ? planRel.name
+        : kind === "custom"
+          ? "Custom Package"
+          : `${kind.toUpperCase()} Package`;
+
+    requests.push({
+      orgId,
+      orgName: String(o.name ?? ""),
+      orgSlug: String(o.slug ?? ""),
+      orgStatus,
+      contactName:
+        typeof o.contact_name === "string" && o.contact_name.trim()
+          ? o.contact_name
+          : "—",
+      email: ownerEmail,
+      whatsappNumber:
+        typeof o.whatsapp_number === "string" && o.whatsapp_number.trim()
+          ? o.whatsapp_number
+          : "—",
+      rejectionReason:
+        typeof o.rejection_reason === "string" ? o.rejection_reason : null,
+      purchaseId: p ? String(p.id) : null,
+      purchaseStatus: p ? String(p.status ?? "pending") : "missing",
+      planId: p && typeof p.plan_id === "string" ? p.plan_id : null,
+      planSummary: `${presetName} · ${eventsTotal} event${eventsTotal === 1 ? "" : "s"} × ${certsPerEvent} certs (${months}m)`,
+      eventsTotal,
+      certsPerEvent,
+      months,
+      listPricePkr: p ? Number(p.list_price_pkr ?? 0) : 0,
+      discountPkr: p ? Number(p.discount_pkr ?? 0) : 0,
+      finalPricePkr: p ? Number(p.final_price_pkr ?? 0) : 0,
+      isPilot: p ? Boolean(p.is_pilot) : false,
+      paymentNote:
+        p && typeof p.payment_note === "string" ? p.payment_note : null,
+      reviewedBy:
+        (p && typeof p.reviewed_by === "string" && p.reviewed_by) ||
+        (typeof o.approved_by === "string" && o.approved_by) ||
+        (typeof o.rejected_by === "string" && o.rejected_by) ||
+        null,
+      reviewedAt:
+        (p && typeof p.reviewed_at === "string" && p.reviewed_at) ||
+        (typeof o.approved_at === "string" && o.approved_at) ||
+        (typeof o.rejected_at === "string" && o.rejected_at) ||
+        null,
+      createdAt: String(o.created_at ?? ""),
+    });
+  }
+
+  return {
+    requests,
+    pendingCount,
+    featureFlags: getFeatureFlags(),
+  };
+}
+
 export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
   const admin = getSupabaseAdmin();
   const nowMs = Date.now();
@@ -237,13 +432,17 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
   const orgs = (orgsRes.data ?? []) as Array<Record<string, unknown>>;
   const orgLookup = new Map<
     string,
-    { name: string; slug: string; status: string }
+    { name: string; slug: string; status: SuperAdminOrgStatus }
   >();
   let activeOrgs = 0;
+  let pendingOrgs = 0;
+  let rejectedOrgs = 0;
   let suspendedOrgs = 0;
   for (const o of orgs) {
-    const st = o.status === "suspended" ? "suspended" : "active";
+    const st = normalizeSuperOrgStatus(o.status);
     if (st === "suspended") suspendedOrgs++;
+    else if (st === "pending") pendingOrgs++;
+    else if (st === "rejected") rejectedOrgs++;
     else activeOrgs++;
     orgLookup.set(String(o.id), {
       name: String(o.name ?? ""),
@@ -347,6 +546,8 @@ export async function getPlatformOverviewData(): Promise<PlatformOverviewData> {
   return {
     totalOrgs: orgs.length,
     activeOrgs,
+    pendingOrgs,
+    rejectedOrgs,
     suspendedOrgs,
     paidOrgs: paidOrgSet.size,
     totalEvents: eventsCountRes.count ?? 0,
@@ -370,22 +571,29 @@ export async function getSuperAdminOrganizationsData(): Promise<{
   const admin = getSupabaseAdmin();
   const nowMs = Date.now();
 
-  const [{ presets }, orgsRes, purchasesRes, eventsRes, certsRes, dlRes, membersDir] =
-    await Promise.all([
-      getPricingAndPresets(),
-      admin
-        .from("organizations")
-        .select("*")
-        .order("created_at", { ascending: false }),
-      admin
-        .from("purchases")
-        .select("org_id, kind, is_pilot, status, expires_at")
-        .order("expires_at", { ascending: true }),
-      admin.from("events").select("org_id"),
-      admin.from("attendee_certificates").select("org_id"),
-      admin.from("download_log").select("org_id"),
-      fetchMembersAuthDirectory(),
-    ]);
+  const [
+    { presets },
+    orgsRes,
+    purchasesRes,
+    eventsRes,
+    certsRes,
+    dlRes,
+    membersDir,
+  ] = await Promise.all([
+    getPricingAndPresets(),
+    admin
+      .from("organizations")
+      .select("*")
+      .order("created_at", { ascending: false }),
+    admin
+      .from("purchases")
+      .select("org_id, kind, is_pilot, status, expires_at")
+      .order("expires_at", { ascending: true }),
+    admin.from("events").select("org_id"),
+    admin.from("attendee_certificates").select("org_id"),
+    admin.from("download_log").select("org_id"),
+    fetchMembersAuthDirectory(),
+  ]);
 
   const purchasesByOrg = new Map<string, Array<Record<string, unknown>>>();
   for (const p of (purchasesRes.data ?? []) as Array<Record<string, unknown>>) {
@@ -416,6 +624,7 @@ export async function getSuperAdminOrganizationsData(): Promise<{
     const orgId = String(o.id);
     const orgMembers = membersDir.byOrg?.get(orgId) ?? [];
     const orgPurchases = purchasesByOrg.get(orgId) ?? [];
+    const status = normalizeSuperOrgStatus(o.status);
 
     const activeUnexp = orgPurchases.filter(
       (p) =>
@@ -442,9 +651,12 @@ export async function getSuperAdminOrganizationsData(): Promise<{
             : String(p0.kind ?? "Active").toUpperCase();
       planExpiresAt =
         typeof p0.expires_at === "string" ? p0.expires_at : null;
-    } else if (pendingList.length > 0) {
+    } else if (pendingList.length > 0 || status === "pending") {
       planId = "pending";
       planName = "Pending";
+    } else if (status === "rejected") {
+      planId = "rejected";
+      planName = "Rejected";
     } else if (orgPurchases.length > 0) {
       planId = "expired";
       planName = "Expired";
@@ -454,7 +666,10 @@ export async function getSuperAdminOrganizationsData(): Promise<{
     }
 
     let lastLoginAt: string | null = null;
-    let ownerEmail: string | null = null;
+    let ownerEmail: string | null =
+      typeof o.contact_email === "string" && o.contact_email
+        ? o.contact_email
+        : null;
     for (const m of orgMembers) {
       if (m.role === "owner" && m.email && !ownerEmail) {
         ownerEmail = m.email;
@@ -472,7 +687,7 @@ export async function getSuperAdminOrganizationsData(): Promise<{
       slug: String(o.slug ?? ""),
       planId,
       planName,
-      status: o.status === "suspended" ? "suspended" : "active",
+      status,
       planExpiresAt,
       eventsCount: eventsByOrg.get(orgId) ?? 0,
       certificatesIssuedCount: certsByOrg.get(orgId) ?? 0,
@@ -490,7 +705,11 @@ export async function getSuperAdminOrganizationsData(): Promise<{
 export async function getSuperAdminOrganizationDetailData(
   orgId: string,
 ): Promise<SuperAdminOrgDetailData | null> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId)) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      orgId,
+    )
+  ) {
     return null;
   }
 
@@ -616,21 +835,23 @@ export async function getSuperAdminOrganizationDetailData(
     (topupsRes.data ?? []) as Array<Record<string, unknown>>
   ).map((r) => mapTopupRow(r, eventTitleById));
 
-  const orgStatus: "active" | "suspended" =
-    o.status === "suspended" ? "suspended" : "active";
+  const orgStatus = normalizeSuperOrgStatus(o.status);
 
   const packageLabel =
     activePurchases.length > 0
       ? activePurchases[0].isPilot
         ? "Pilot Package"
         : `${activePurchases[0].kind.toUpperCase()} Package`
-      : purchases.some((p) => p.status === "pending")
+      : purchases.some((p) => p.status === "pending") || orgStatus === "pending"
         ? "Pending Approval"
-        : purchases.length > 0
-          ? "Expired"
-          : "No Package";
+        : orgStatus === "rejected"
+          ? "Rejected"
+          : purchases.length > 0
+            ? "Expired"
+            : "No Package";
 
-  const soonestExp = activePurchases[0]?.expiresAt ?? purchases[0]?.expiresAt ?? null;
+  const soonestExp =
+    activePurchases[0]?.expiresAt ?? purchases[0]?.expiresAt ?? null;
 
   const auditLogs: PlatformAuditLogItem[] = (
     (auditRes.data ?? []) as Array<Record<string, unknown>>
@@ -655,6 +876,13 @@ export async function getSuperAdminOrganizationDetailData(
       planId: String(o.plan_id ?? "none"),
       packageLabel,
       status: orgStatus,
+      contactName: typeof o.contact_name === "string" ? o.contact_name : null,
+      contactEmail:
+        typeof o.contact_email === "string" ? o.contact_email : null,
+      whatsappNumber:
+        typeof o.whatsapp_number === "string" ? o.whatsapp_number : null,
+      rejectionReason:
+        typeof o.rejection_reason === "string" ? o.rejection_reason : null,
       planExpiresAt: soonestExp,
       planExpiringSoon: Boolean(o.plan_expiring_soon),
       createdAt: String(o.created_at ?? ""),
